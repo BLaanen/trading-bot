@@ -30,7 +30,7 @@ from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass, asdict, field
 
-BASE = Path(__file__).parent
+BASE = Path(__file__).resolve().parent.parent
 ADAPTATIONS_FILE = BASE / "adaptations.json"
 OVERRIDES_FILE = BASE / "config_overrides.json"
 CHANGELOG_FILE = BASE / "config_changelog.md"

@@ -40,17 +40,17 @@ echo "=== Daily Report ==="
 
 echo
 echo "=== Learning Loop ==="
-"$PY" learning_loop.py || echo "  (learning loop failed, continuing)"
+"$PY" analysis/learning_loop.py || echo "  (learning loop failed, continuing)"
 
 echo
 echo "=== Adaptive Config Status ==="
-"$PY" adaptive_config.py --status || echo "  (status failed, continuing)"
+"$PY" analysis/adaptive_config.py --status || echo "  (status failed, continuing)"
 
 # Weekly report on Fridays only (weekday 5 in date format, or $(date +%u) == 5)
 if [ "$(date +%u)" = "5" ]; then
   echo
   echo "=== Weekly Report (Friday) ==="
-  "$PY" weekly_report.py || echo "  (weekly report failed, continuing)"
+  "$PY" analysis/weekly_report.py || echo "  (weekly report failed, continuing)"
 fi
 
 echo

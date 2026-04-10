@@ -26,7 +26,7 @@ from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
 
-BASE = Path(__file__).parent
+BASE = Path(__file__).resolve().parent.parent
 HYPOTHESES_FILE = BASE / "hypotheses.md"
 GENERATED_HYPOTHESES_FILE = BASE / "generated_hypotheses.json"
 TRADES_CSV = BASE / "trades.csv"

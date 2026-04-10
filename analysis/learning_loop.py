@@ -31,7 +31,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
-BASE = Path(__file__).parent
+BASE = Path(__file__).resolve().parent.parent
 JOURNAL_FILE = BASE / "trade_journal.md"
 LESSONS_FILE = BASE / "lessons.md"
 HYPOTHESES_FILE = BASE / "hypotheses.md"

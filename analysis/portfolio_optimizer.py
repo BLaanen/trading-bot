@@ -5,6 +5,10 @@ Calculates optimal ETF portfolio weights using Modern Portfolio Theory.
 Run: pip install riskfolio-lib yfinance pandas matplotlib && python portfolio_optimizer.py
 """
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import pandas as pd
 
 from data_provider import get_provider

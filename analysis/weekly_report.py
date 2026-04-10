@@ -26,7 +26,7 @@ from pathlib import Path
 from datetime import datetime, timedelta, date
 from collections import defaultdict
 
-BASE = Path(__file__).parent
+BASE = Path(__file__).resolve().parent.parent
 REPORTS_DIR = BASE / "reports"
 TRADES_CSV = BASE / "trades.csv"
 PORTFOLIO_CSV = BASE / "portfolio_value.csv"
