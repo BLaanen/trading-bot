@@ -1,0 +1,29 @@
+# Trading Bot Schedule — US market hours translated to CEST
+# Installed via: crontab /Users/bopeterlaanen/trading/crontab.txt
+#
+# All times are LOCAL (CEST). US market hours in CEST:
+#   Market open:  15:30 CEST  (09:30 ET)
+#   Market close: 22:00 CEST  (16:00 ET)
+#
+# Cron fields: minute hour day-of-month month day-of-week (0=Sun, 1-5=Mon-Fri)
+
+# ── Daily trade entry ──
+# At 15:25 CEST Mon-Fri: wait for open (15:30), wait 10 min for spreads to settle,
+# then scan + filter + execute up to 6 trades, then exit.
+# --no-scheduler: exit after execution (monitor cron handles the rest of the day)
+# --skip-eod:     skip learning loop here (eod.sh handles that at 22:10)
+25 15 * * 1-5  /Users/bopeterlaanen/trading/at_open.sh --no-scheduler --skip-eod >> /Users/bopeterlaanen/trading/logs/cron_at_open.log 2>&1
+
+# ── Position monitoring (every 5 min during market hours) ──
+# Trails stops, triggers partial/full exits.
+# monitor.sh silently exits if the market is closed, so running extra minutes is safe.
+*/5 15-21 * * 1-5  /Users/bopeterlaanen/trading/monitor.sh >> /Users/bopeterlaanen/trading/logs/cron_monitor.log 2>&1
+
+# ── Last monitor pass right before close (22:00 CEST) ──
+# Catches anything that moves in the last 5 minutes.
+58 21 * * 1-5  /Users/bopeterlaanen/trading/monitor.sh >> /Users/bopeterlaanen/trading/logs/cron_monitor.log 2>&1
+
+# ── End of day: learning loop + weekly report ──
+# Runs 10 min after close to give positions time to settle.
+# Autopsies closed trades, updates patterns, runs weekly report on Fridays.
+10 22 * * 1-5  /Users/bopeterlaanen/trading/eod.sh >> /Users/bopeterlaanen/trading/logs/cron_eod.log 2>&1

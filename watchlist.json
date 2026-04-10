@@ -1,0 +1,17 @@
+{
+  "description": "Extra tickers to always include in the scanning universe, regardless of liquidity filters. Add anything you want the scanner to evaluate.",
+  "tickers": [
+    "ALK",
+    "ALM",
+    "CRDO",
+    "DYN",
+    "EWY",
+    "HIMX",
+    "LUMN",
+    "OPTX",
+    "PRM",
+    "SN",
+    "TPR",
+    "TTMI"
+  ]
+}

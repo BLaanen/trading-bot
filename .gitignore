@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Runtime / live state (churns every few minutes, not source)
+positions.json
+learning_state.json
+edge_tracker.json
+last_run.json
+signals.csv
+.universe_cache.json
+.data_cache/
+wheel_states/
+
+# Audit trail / history (local-only, user preference)
+trades.csv
+portfolio_value.csv
+order_log.json
+
+# Logs
+logs/
+*.log
+
+# Secrets / credentials
+.env
+.env.*
+!.env.example
+credentials.json
+*.key
+*.pem
+
+# Generated reports
+reports/*.html
+reports/*.pdf
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
