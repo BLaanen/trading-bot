@@ -1,97 +1,139 @@
-# Coding Conventions
-
-**Analysis Date:** 2026-04-09
+# Code Conventions
 
 ## Naming Patterns
 
-**Files:** `snake_case.py` (e.g., `scanner.py`, `risk_manager.py`, `data_provider.py`). Entry points that execute are typically named after what they do: `orchestrator.py`, `executor.py`, `backtest_momentum.py`.
+**Files:** `snake_case.py`. Domain modules: `scanner.py`, `executor.py`, `risk_manager.py`, `regime.py`, `trade_tracker.py`, `data_provider.py`. Entry point: `orchestrator.py`.
 
-**Functions:** `snake_case`, verbs where actions occur (e.g., `run_full_scan()`, `calc_rsi()`, `load_positions()`, `process_signal()`). Private helpers start with `_`: `_get_provider()`.
+**Functions & Variables:** `snake_case`. Private functions prefixed with `_`: `_get_provider()`, `_wait_for_fill()`, `_submit_bracket_order()`, `_check_bracket_children()`, `_submit_sell()`.
 
-**Variables:** `snake_case`. Configuration and dataclass fields use full names: `entry_price`, `stop_loss`, `reward_risk_ratio` (not abbreviated).
+**Classes & Dataclasses:** `PascalCase`. Core types use `@dataclass`: `AgentConfig`, `Signal`, `Position`, `PortfolioState`, `OrderResult`, `RiskDecision`, `ValidationResult`, `RegimeState`, `CorrelationData`.
 
-**Classes:** `PascalCase`. Data classes use `@dataclass`: `AgentConfig`, `Signal`, `Position`, `PortfolioState`. Abstract bases end in ABC: `DataProvider(ABC)`.
+**Constants:** `UPPER_SNAKE_CASE`. Thresholds, paths, timeouts: `SLIPPAGE_RR_THRESHOLD`, `FILL_POLL_TIMEOUT`, `ORDER_LOG`, `POSITIONS_FILE`, `TRADES_FILE`.
 
 ## Code Style
 
-**Formatting:** No explicit formatter found. Code follows PEP 8 style: 4-space indents, max line length ~100 chars, docstrings use triple quotes.
+**Format:** PEP 8. No explicit formatter enforced (no `.flake8` or `pyproject.toml`). Lines ~70–100 chars. 4-space indents.
 
-**Linting:** No linter config present (no `.flake8`, `.pylintrc`, `pyproject.toml`). Style is enforced by convention: use type hints extensively, avoid bare `except:`.
+**Docstrings:** Module-level docstrings are narrative (why + how). See `config.py` (explains 1R asymmetric risk), `scanner.py` (signal structure), `executor.py` (bracket lifecycle), `risk_manager.py` (position sizing + trailing).
+
+**Section markers:** Visual navigation via `# ─── Comment ───────────────────` blocks separating logic sections.
 
 ## Import Organization
 
-**Order:** Standard library imports first, then third-party (pandas, numpy), then local imports. Group by purpose, separated by blank lines. Use full module imports for clarity: `from config import AgentConfig` not `import config`.
+Order: stdlib → third-party → local. No blank lines between groups.
 
-Example from `scanner.py`:
 ```python
+import sys, json, os
+from datetime import datetime, timedelta
+from pathlib import Path
+
 import pandas as pd
 import numpy as np
-from dataclasses import dataclass
-from datetime import datetime
+from abc import ABC, abstractmethod
 
 from config import AgentConfig
-from data_provider import get_provider
+from scanner import Signal
+from risk_manager import Position, load_positions, save_positions
+```
+
+Optional SDK imports wrapped in `try/except`:
+```python
+try:
+    import alpaca_trade_api as tradeapi
+    HAS_ALPACA = True
+except ImportError:
+    HAS_ALPACA = False
 ```
 
 ## Error Handling
 
-**Patterns:** Use explicit try-except with fallback logic, not bare `except:`. Log errors and return `None` for optional data retrieval.
+**Try-except pattern:** Catch specific exceptions where possible. Print warnings, fall back gracefully. No custom exceptions.
 
-Example from `scanner.py`:
 ```python
 try:
-    data = _get_provider().get_bars(ticker, period=period)
-    if data.empty or len(data) < 60:
-        return None
-    return data
-except Exception:
+    client = tradeapi.REST(api_key, api_secret, config.alpaca_base_url)
+    client.get_account()
+    return client
+except Exception as e:
+    print(f"  [WARN] Alpaca connection failed: {e}")
+    print(f"  [WARN] Falling back to simulated execution")
     return None
 ```
 
-For risky operations, capture and return decision objects. See `orchestrator.py` Step 3 filter layer — every rejection logged with reason.
+**API polling:** Explicit deadline loops with time.time() checks. See `_wait_for_fill()` — polls for 30s, returns (status, fill_price) tuple.
 
 ## Logging
 
-**Framework:** Print statements to stdout, formatted with ASCII boxes for section headers.
+**No logging module.** All output via `print()` with structured prefixes.
 
-Example from `orchestrator.py`:
+**Format:** `[LEVEL] message` where LEVEL ∈ {`PASS`, `FAIL`, `WARN`, `INFO`, `EXIT`, `TRAIL`, `SLIPPAGE_REJECT`, `CRITICAL`}.
+
 ```python
-print("\n" + "=" * 70)
-print(f"  STEP 1: STRATEGY VALIDATION")
-print("=" * 70)
-print(f"  Approved strategies: {len(approved)}")
+print(f"  [SLIPPAGE_REJECT] R:R dropped to {new_rr:.2f}")
+print(f"  → Filled at ${actual_fill_price:.2f}")
 ```
 
-Use indented print blocks for hierarchical output. No formal logging library — stdout is the journal.
+**Sections:** Use `= * 70` delimiters for major steps:
+```python
+print("\n" + "=" * 70)
+print("  STEP 1: STRATEGY VALIDATION")
+print("=" * 70)
+```
 
 ## Function Design
 
-**Size:** Functions typically 20-80 lines. Scan strategies (`scan_pullback()`, `scan_ma_bounce()`) are 50-60 lines each — acceptable because they're self-contained logic flows. Extract into helpers when logic repeats: `calc_rsi()`, `find_support()` are reusable indicator functions.
+**Signature pattern:** Core object first, config last. 3–5 parameters typical.
 
-**Parameters:** Keep 3-5 parameters max. Use dataclass objects for config: all functions take `config: AgentConfig`, avoid long parameter lists. Return tuples only when paired results: `calc_stochastic()` → `tuple[pd.Series, pd.Series]`.
+```python
+def process_signal(signal: Signal, config: AgentConfig, regime_name: str = "") -> OrderResult | None:
+def calculate_position_size(signal: Signal, state: PortfolioState, config: AgentConfig) -> int:
+def _submit_bracket_order(client, ticker: str, shares: int, stop_price: float, target_price: float) -> OrderResult:
+```
+
+**Return types:** Explicit union syntax (`OrderResult | None`), tuple for paired results (`tuple[str, float]`), dataclass for complex returns.
+
+**Size:** 20–60 lines. Private helpers extract reusable logic (`_wait_for_fill()`, `_check_bracket_children()`, `_submit_sell()`).
+
+**Properties in dataclasses:** Use `@property` for computed fields. `Position` has `market_value`, `cost_basis`, `pnl`, `pnl_pct`, `r_multiple`, `hit_stop`, `hit_target`. Risk calculations leverage these.
 
 ## Module Design
 
-**Exports:** Each module is a feature layer. `scanner.py` exports signal-building functions and the `Signal` dataclass. `risk_manager.py` exports position management: `Position`, `PortfolioState`, and functions like `load_positions()`, `evaluate_new_trade()`. No wildcard imports — be explicit.
+**Pattern:** Export small public API (1–2 dataclasses + 3–5 functions). Cascade: `orchestrator.py` → domain modules (scanner, executor, risk_manager) → `config.py`.
 
-**Data Flow:** Modules pass data through dataclass objects (`Signal`, `Position`, `PortfolioState`), not dicts. This ensures type safety and IDE autocompletion.
+**Data flow:** Pass domain objects (`Signal`, `Position`, `PortfolioState`), never dicts. Example pipeline:
+- `scanner.py` generates `list[Signal]`
+- `risk_manager.py` evaluates Signal + PortfolioState → `RiskDecision`
+- `executor.py` processes Signal → `OrderResult`
+
+**State files:** JSON (positions, order log, last run state) and CSV (trades, portfolio value). Loaded/saved via explicit `load_positions()` / `save_positions()` / `log_trade()`. Path set via `TRADING_STATE_DIR` env var (defaults to script dir).
 
 ## Type Hints
 
-**Pattern:** Use Python 3.10+ union syntax `list[Signal]`, `dict[str, list[str]]`, `str | None`. All function signatures include return types. Properties use `@property` decorators with computed returns, no `self` type hints needed.
+**Required on all functions.** Parameter and return types mandatory.
 
-Example from `scanner.py`:
 ```python
-def calc_rsi(series: pd.Series, period: int = 14) -> pd.Series:
-def scan_pullback(ticker: str, config: AgentConfig) -> Signal | None:
+def fetch_data(ticker: str, period: str = "1y") -> pd.DataFrame | None:
+def log_trade(ticker: str, action: str, shares: int, price: float, ...) -> None:
+def get_bulk_prices(self, tickers: list[str]) -> dict[str, float]:
+```
+
+**Union syntax:** Use `|` (PEP 604), not `Union[]`.
+
+**Dataclass fields:** Full type annotations.
+```python
+@dataclass
+class Position:
+    ticker: str
+    shares: int
+    entry_price: float
+    trailing: bool = False
+    bracket_order_id: str = ""
 ```
 
 ## Comments
 
-**Pattern:** Module-level docstrings explain the WHY — philosophy and math. See docstring at top of `config.py` explaining the asymmetric risk strategy. Inline comments use `─` box dividers for section breaks, not `#` comments mid-code. Code is self-documenting; comments explain trade-offs.
+**Module docstrings:** Explain problem, solution, and context. Example: "Execution Agent: Handles position lifecycle — entry (bracket order at broker), monitor (check exits), exit (Python backup if broker-side fails)."
 
-Example from `scanner.py`:
-```python
-# ─── Strategy 1: Pullback to Support in Uptrend ─────────────────────────────
-# Why it works: you're buying weakness in strength...
-```
+**Inline comments:** Minimal. Only for non-obvious math/assumptions: `# Cumulative R gained/lost`, `# 200 SMA as major trend filter`.
+
+**No comment-only lines** between blocks. Use section markers instead.

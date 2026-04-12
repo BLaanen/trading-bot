@@ -1,114 +1,105 @@
-# Codebase Concerns
-
-**Analysis Date:** 2026-04-09
+# Trading System — Known Concerns & Fragile Areas
 
 ## Tech Debt
 
-**Silent API failures with broad exception handling:**
-- Issue: Multiple providers catch `Exception` globally, masking real errors (rate limits, auth failures, network timeouts)
-- Files: `data_provider.py:126-127`, `data_provider.py:146-147`, `data_provider.py:192-193`, `data_provider.py:199-200`, `data_provider.py:208-209`, `scanner.py:76-77`
-- Impact: System gracefully degrades but loses debugging information; auth issues go unnoticed until production
-- Fix approach: Catch specific exceptions (e.g., `AuthenticationError`, `RateLimitError`, `TimeoutError`); log and emit metrics before returning fallback
+**Broad exception handling masks root causes.** Across the codebase, `except Exception:` patterns (often with bare `pass` or generic returns) hide failures:
+- `data_provider.py:197-200, 206-208, 217-219` — data fetch failures logged only as print statements, don't propagate upstream
+- `executor.py:110-112, 133-135, 195-196` — order submission errors swallowed; API auth failures = silent fallback to simulation
+- `universe.py:113-115, 155-157, 181-183` — Wikipedia scraping failures leave universe empty or stale
 
-**Price data gaps not validated before use:**
-- Issue: `executor.py:241-242` only checks if ticker exists in prices dict, doesn't validate against None or stale prices
-- Files: `executor.py:237-244`, `data_provider.py:129-147` (bulk_prices)
-- Impact: If a price fetch returns None for a ticker in portfolio, position PnL calculations will fail silently; trailing stop triggers may use stale high_water_mark
-- Fix approach: Validate all prices non-None before position updates; require minimum freshness check (< 1hr old) before trading
+Fix: Replace with specific exception types (ConnectionError, ValueError, etc.) and propagate critical failures to orchestrator's decision loop.
 
-**N+1 scanner pattern — loops through 300+ tickers per scanner:**
-- Issue: `scanner.py:610-618` calls scanner function for EACH ticker in ALL tickers (5 scanners × 300+ tickers = 1500+ function calls per scan)
-- Files: `scanner.py:610-618`, `scanner.py:587-645`
-- Impact: At ~200ms per ticker, scan cycle takes 5+ minutes; each call to `fetch_data()` re-downloads bars even if cached
-- Fix approach: Batch fetch all ticker bars once, pass to scanner functions; vectorize indicator calcs where possible (e.g., RSI across all tickers in one call)
+**N+1 scanner pattern.** `scanner.py:594-599` iterates all tickers sequentially, calling `scanner_fn(ticker)` which internally calls `fetch_data(ticker)` → `get_provider().get_bars()`. In full scan: 200+ tickers × 5 scanners = 1000+ API calls. Each ticker-strategy combo fetches the same 1-year OHLCV bar series independently.
 
-**Risky bare except in strategy validation:**
-- Issue: `strategy_validator.py:346` catches all exceptions during backtest validation without logging reason
-- Files: `strategy_validator.py:342-347`
-- Impact: Backtesting can silently fail for bad data, returning false negatives; no signal what went wrong (bad OHLC shape, missing column, etc.)
-- Fix approach: Log exception type/message before returning failed result; add validation for OHLC shape before backtest
+Fix: Cache bars-per-ticker once before scanner loop, pass cached data to each strategy. Would reduce calls 5-10x.
+
+**Stale data risk in monitor/trailing.** `executor.py` manages positions but `manage_positions()` relies on a single price snapshot per run. If monitor runs only once at 18:30 CEST, intraday stops/targets could fire without local state update for ~6 hours. Position high_water_mark may be stale.
+
+Fix: Monitor should query latest prices from Alpaca before trailing stops (optional: run monitor twice daily).
 
 ## Security Considerations
 
-**API credentials not validated before use:**
-- Risk: `executor.py:47-52` and `data_provider.py:285-294` check env vars but don't validate format or expiration; invalid keys silently fall back to Yahoo Finance
-- Files: `executor.py:47-52`, `data_provider.py:285-294`
-- Recommendations: Add startup check: call `test_api_connection()` on Alpaca; warn if keys present but invalid; refuse to trade on invalid keys
+**API credentials validated weakly.** `executor.py:55-67` and `data_provider.py:295-307` call `get_alpaca_client()` or `AlpacaProvider()` without verifying keys are valid before passing to library. If keys are malformed or expired, try/except catches and falls back to simulation silently — user won't know they're not trading live.
 
-**positions.json and order_log.json not encrypted:**
-- Risk: Trade history, entry prices, stops all stored plain-text on disk
-- Files: `risk_manager.py:128-150` (POSITIONS_FILE), `executor.py:33` (ORDER_LOG)
-- Recommendations: Encrypt sensitive fields at rest; use `cryptography` lib; rotate keys on access
+Fix: Add explicit credential validation on startup: `GET /account` call and confirm paper/live mode.
+
+**State files readable by all users.** `positions.json`, `order_log.json`, `trades.csv` have permissions `644` (world-readable). On shared systems, portfolio state is exposed.
+
+Fix: Set permissions to `600` in `trade_tracker.py:init_files()` and `risk_manager.py:save_positions()`.
+
+**No audit log for simulated vs. live mode.** Cannot verify if trades were sent to Alpaca or simulated. Critical for debugging order mismatches.
+
+Fix: Add mode flag to order_log.json entries.
 
 ## Performance Bottlenecks
 
-**Weekly universe rebuild blocks on Wikipedia fetch:**
-- Problem: `universe.py:75-95` makes 2 HTTP requests to Wikipedia (S&P 500 + NASDAQ-100) sequentially, no timeout; blocks entire scan if Wikipedia slow
-- File: `universe.py:75-95`, `universe.py:120-140`
+**Universe rebuild on every scan.** `universe.py` fetches S&P 500 + NASDAQ-100 from Wikipedia on every run unless cache applies. Missing cache → scan hangs 5+ seconds on HTTP.
 
-**Scanning 300+ tickers sequentially instead of parallel:**
-- Problem: `scanner.py:610-618` processes one ticker at a time; CPU idle 95% of time waiting for data_provider calls
-- File: `scanner.py:610-618`
+Fix: Pre-build universe.json at startup; scan never blocks on web requests.
 
-**Cache invalidation too aggressive on live data:**
-- Problem: `data_provider.py:235-248` expires all non-historical cache every 4 hours; forces re-download on every scan if using real-time Alpaca
-- File: `data_provider.py:225-228`, `data_provider.py:235-248`
+**Cache invalidation fragile.** `data_provider.py:245-258` checks cache freshness by file mtime. Cache key includes `period` string — `period="1y"` and `period="1y "` generate different keys. No cache busting on provider upgrade.
+
+Fix: Use consistent period normalization; include provider version in cache key.
+
+**Backtesting not parallelized.** `strategy_validator.py` runs `validate_all()` sequentially. With 5 strategies × 500 tickers, validation takes minutes.
+
+Fix: Use multiprocessing pool; checkpoint after each strategy.
 
 ## Fragile Areas
 
-**Position sizing can round to 0 shares:**
-- Why fragile: `risk_manager.py:250` uses `int()` truncation; tight stops + low risk amount can round down to 0
-- File: `risk_manager.py:238-250`
-- Test coverage: No test for minimum share size; affects small accounts (<$1K)
-- Fix: Add check `if shares_by_risk < 1: return REJECT`
+**Position sizing edge case: zero risk.** `risk_manager.py:245-247` returns 0 shares if `risk_per_share <= 0`. CAN occur if position is manually edited in JSON. Silently rejects with no feedback.
 
-**Trailing stop logic assumes price always moves up:**
-- Why fragile: `risk_manager.py:288-300` updates high_water_mark but only if current_price > previous high_water_mark; gaps down overnight cause stale HWM
-- File: `risk_manager.py:288-300`
-- Test coverage: Untested for overnight gaps; may trail stop at wrong level after hard reversal
+Fix: Validate `signal.risk > 0` at scanner output, not sizing stage.
 
-**Partial exit can create fractional shares:**
-- Why fragile: `executor.py:145` calculates `exit_shares = int(pos.shares * config.partial_exit_pct)` but doesn't validate remaining shares >= 1
-- File: `executor.py:144-147`
-- Test coverage: Manual trades OK, but backtester may fail if exit creates 0 shares
+**Trailing stop can invert above entry.** `risk_manager.py:305-316` calculates `stop_loss = high_water_mark * (1 - trail_distance_pct)`. If HWM is close to target, trailing can place stop ABOVE entry. Next bar exits at loss.
 
-**Regime detection depends on single 200-SMA cross:**
-- Why fragile: `regime.py` determines bull/bear/sideways from SPY 200 SMA alone; one false signal derails edge tracking
-- File: `regime.py` (full file)
-- Test coverage: No validation against known market regimes (March 2020, Jan 2022, etc.)
+Fix: Clamp trailing stop to never exceed `entry_price + 0.5*risk`.
+
+**Regime detection incomplete in downtrends.** `regime.py:76-90` only runs PULLBACK/POWERX in TRENDING_DOWN. No short strategies exist. If regime flips, cash sits idle with no defense against further drawdown.
+
+Fix: Implement short strategies or add "exit all, sit in cash" decision.
+
+**Reconciliation mismatch blocks all trading.** `reconcile.py:72-78` refuses to trade if ANY position mismatches. A single stale position or rounding error freezes entire system. No recovery except manual JSON edit.
+
+Fix: Log mismatch but proceed with REDUCED position sizes. Add CLI command to re-sync.
 
 ## Dependencies at Risk
 
-**yfinance (0.2.28+) — single point of failure:**
-- Risk: Yahoo Finance API is not guaranteed stable; yfinance reverse-engineers it; breakage = entire system halts
-- Migration plan: Ensure Alpaca key/secret are set for fallback; add Twelve Data or Alpha Vantage as tertiary provider
+**yfinance is community-maintained, no SLA.** `data_provider.py:90-147` depends on yfinance for free data. Yahoo Finance can IP-block heavy users or change API without notice.
 
-**alpaca-trade-api (3.0+) — unstable API surface:**
-- Risk: Alpaca frequently changes endpoint behavior; 3.0 had breaking changes in bar requests
-- Migration plan: Pin to specific version (3.0.4+); test API compatibility monthly; have manual execution docs
+Risk: yfinance outage → no data → no signals → no trades. Fix: Pre-fetch data EOD Friday, cache it.
 
-**backtesting (0.3.3) — minimal maintenance:**
-- Risk: Backtesting lib hasn't had major updates; community fork `backtrader` is more maintained
-- Migration plan: If backtesting breaks, switch to `backtrader` or pandas-only backtest loop
+**alpaca-trade-api version lock uncertain.** `requirements.txt` specifies `>=3.0` with no upper bound. Alpaca may break backward compatibility in v4+. Library uses undocumented `order.legs` attribute.
+
+Risk: Dependency upgrade breaks bracket parsing. Fix: Pin to `==3.2.1` after testing.
+
+**backtesting library inactive.** `strategy_validator.py` uses backtesting.py but maintainer is inactive. No pandas 2.1+ support tested.
+
+Risk: Future pandas incompatibility. Fix: Freeze `backtesting==0.3.3` and pandas `<2.2` or migrate to vectorbt.
 
 ## Test Coverage Gaps
 
-**No integration tests for Alpaca order flow:**
-- What's not tested: Real order submission, fills, position updates from live API
-- Priority: High — live trading depends on this working
-- Gap: Only simulated orders are tested
+**No integration test for reconciliation failure.** `test_executor.py` and `test_simulation.py` mock or skip reconcile. Can't reproduce broker-vs-local mismatch without live API.
 
-**No tests for data provider fallback chain:**
-- What's not tested: Behavior when Alpaca fails mid-scan; whether Yahoo provider gracefully takes over
-- Priority: High — if Alpaca auth breaks, system must degrade safely
-- Gap: Only happy path tested
+Fix: Add integration test with mock Alpaca API returning deliberate mismatches.
 
-**No stress tests for trailing stops with gaps:**
-- What's not tested: Overnight gaps > ATR; fast market opens; what happens if price skips stop_loss level
-- Priority: Medium — edge case but capital at risk
-- Gap: Simulator doesn't model pre-market gaps
+**No stress test for regime flips.** If regime changes mid-scan (market crash at 14:00 ET), strategies allowed at scan start may be disallowed by execution. Execution proceeds with wrong position size.
 
-**Strategy validator backtest edge cases:**
-- What's not tested: Minimum data requirements (< 200 bars); NaN in OHLC; dividend/split adjusted vs raw prices
-- Priority: Medium — can cause silent validation failures
-- Gap: No parametrized tests for data quality issues
+Fix: Check regime before EVERY signal execution, not just at step start.
+
+**No fallback chain tests.** `data_provider.py` tries Alpaca → Yahoo. If both fail, returns empty DataFrame. Scanner handles `data is None` but `data.empty` crashes calc_* functions.
+
+Fix: Unit test `test_empty_dataframe_handling()` — verify all calc_* return gracefully on 0 bars.
+
+**Monitor not tested end-to-end.** `manage_positions()` never tested to verify trailing stops update positions.json and broker state.
+
+Fix: Add `test_monitor_trailing_stop_updated()` with synthetic position and mock price.
+
+---
+
+**Actionable priority:**
+1. **CRITICAL:** Credential validation on startup (security + UX)
+2. **HIGH:** Cache scanner data per-ticker; fix N+1 pattern
+3. **HIGH:** Reconciliation recovery path (currently blocks trading)
+4. **MEDIUM:** State file permissions 600 (security)
+5. **MEDIUM:** Broad exception → specific types (debugging)

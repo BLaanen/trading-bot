@@ -1,91 +1,136 @@
-# Testing Patterns
-
-**Analysis Date:** 2026-04-09
+# Testing Framework & Patterns
 
 ## Test Framework
 
-**Runner:** Python's built-in `unittest` module (implicit via test file structure). No pytest config found. Test file `test_simulation.py` runs standalone: `python test_simulation.py`.
+**No pytest, unittest, or nose.** Tests are **standalone executable scripts** run with `python test_*.py`. Output is print-based; assertions are custom `check()` function calls (not assert statements).
 
-**Run Commands:**
+**Test files:** `test_simulation.py` (end-to-end), `test_executor.py` (bracket orders & slippage). Both at project root.
+
+**Runner:** `python test_simulation.py` and `python test_executor.py`. No test discovery. Both run to completion and print pass/fail counts.
+
+## Run Commands
+
 ```bash
-python test_simulation.py        # Full system simulation
-python orchestrator.py --validate  # Unit-level strategy validation via backtest
-python orchestrator.py --monitor   # Live position management test
+python test_simulation.py        # Full pipeline: scan → risk → execute → monitor → report
+python test_executor.py          # Bracket orders, slippage, reconciliation
+python test_simulation.py 2>&1 | tail -20  # See summary
 ```
-
-No formal test runner config. Tests are executable scripts that print results to stdout.
 
 ## Test File Organization
 
-**Location:** `test_simulation.py` is at project root (same level as `orchestrator.py`). No `tests/` directory. Tests import modules directly via `sys.path.insert()`.
+**Location:** Project root, same level as `orchestrator.py`.
 
-**Naming:** Single file `test_simulation.py`. Reflects end-to-end testing philosophy — entire pipeline tested in one scenario rather than isolated unit tests.
+**Structure per test file:**
+
+1. **Sandbox setup:** Redirect state files to temp dir BEFORE importing trading modules
+2. **Imports & helpers:** Import config, modules, define `_reset_state()`, `_make_signal()`, `generate_trending_data()`
+3. **Test sections:** Numbered TEST blocks with visual dividers (`= * 70`, `─ * 70`)
+4. **Results summary:** Final print of `{passed} passed, {failed} failed`
 
 ## Test Structure
 
-**Patterns:** Linear test flow with numbered sections (TEST 1, TEST 2, etc.). Each section:
-1. Generates synthetic data or state
-2. Runs system components
-3. Prints assertions and intermediate state
-4. Progresses to next scenario
+**Linear flow with sections.** Each test block:
+1. Reset state (call `_reset_state(cash=10000)`)
+2. Set up test data (signals, prices, positions)
+3. Run component(s) under test
+4. Check results via `check(name, condition)`
 
-No assertions — validation is visual (print statements verify expected behavior). Test traces a full trade lifecycle: entry → price moves → trailing stops → partial exits → final close.
-
-Example from `test_simulation.py`:
+Example (`test_executor.py` lines 75–80):
 ```python
-print("\n" + "─" * 70)
-print("  TEST 1: Signal Generation")
-print("─" * 70)
-
-signals = [
-    Signal(ticker="AAPL", strategy="POWERX", ...),
-    ...
-]
-
-for s in signals:
-    print(f"  {s.ticker:<6} R:R={s.reward_risk:.1f}x")
+print("\n── Test 1: Bracket order structure ──")
+_reset_state()
+result = _submit_bracket_order(None, "TEST", 10, stop_price=95.0, target_price=110.0)
+check("Bracket order succeeds", result.success)
+check("Order has ID", result.order_id != "")
 ```
 
-## Mocking
+## Assertion Style
 
-**Framework:** Manual mocking via synthetic data generation. `test_simulation.py` creates fake OHLCV data with `generate_trending_data()`:
+**Custom `check()` function.** No assert statements. Tallies pass/fail globally.
 
 ```python
-def generate_trending_data(ticker: str, days: int = 200, 
-                          start_price: float = 100,
-                          trend: float = 0.0005, 
-                          volatility: float = 0.015) -> pd.DataFrame:
-    """Generate realistic OHLCV data with a trend."""
-    np.random.seed(hash(ticker) % 2**31)
-    ...
+def check(name, condition):
+    global passed, failed
+    if condition:
+        passed += 1
+        print(f"  [PASS] {name}")
+    else:
+        failed += 1
+        print(f"  [FAIL] {name}")
 ```
 
-Price movement scenarios are hardcoded dicts:
+Output immediately visible; counters track overall result. See `test_executor.py` lines 60–67.
+
+## Mocking & Synthetic Data
+
+**No unittest.mock.patch.** Instead: synthetic data generation + simulated execution.
+
+**Synthetic OHLCV:** `generate_trending_data()` in `test_simulation.py` creates realistic price series using random walk with drift.
+
 ```python
-price_moves = {
-    "AAPL": 199.00,   # Up ~2%
-    "NVDA": 845.00,   # Down slightly
-}
+def generate_trending_data(ticker: str, days: int = 200, start_price: float = 100,
+                           trend: float = 0.0005, volatility: float = 0.015) -> pd.DataFrame:
+    np.random.seed(hash(ticker) % 2**31)  # Deterministic
+    returns = np.random.normal(trend, volatility, days)
+    close = start_price * np.cumprod(1 + returns)
+    # ... generate OHLC from close
+    return DataFrame with Open, High, Low, Close, Volume
 ```
 
-No mocking library (no `unittest.mock`). State is mocked by creating `PortfolioState` objects directly and manipulating `position.current_price`.
+**Manual signals:** Build via Signal constructor, not scanner. Example:
+```python
+Signal(
+    ticker="AAPL", strategy="POWERX", direction="LONG",
+    entry_price=195.00, stop_loss=190.50, target=204.00,
+    reason="Triple confirm: RSI(7)=62 cross, MACD hist +0.45",
+)
+```
 
-## Coverage
+**Alpaca mock:** Functions check `if client is None` and use simulated execution. `_submit_bracket_order(None, ...)` returns synthetic OrderResult. See `executor.py` line 165.
 
-**Requirements:** None enforced. No coverage tool or targets specified. Test coverage is determined by manual inspection: does the end-to-end test exercise all major code paths?
+**State isolation:** Temp directory sandboxes all file writes. See `test_simulation.py` lines 26–28:
+```python
+_tmpdir = tempfile.mkdtemp(prefix="trading_test_")
+os.environ["TRADING_STATE_DIR"] = _tmpdir
+atexit.register(shutil.rmtree, _tmpdir, ignore_errors=True)
+```
 
-**Strategy validation (backtesting) happens in `strategy_validator.py` — validates signals against historical data per strategy type, ensuring only strategies with Sharpe >= 0.5 and win rate >= 40% are approved for trading.
+## Coverage Requirements
 
-## Test Data
+**No code coverage tool enforced.** Coverage is manual: tests exercise critical paths.
 
-**Pattern:** Synthetic data is seeded for reproducibility (`np.random.seed(hash(ticker) % 2**31)`). Hard-coded signal prices test specific scenarios: rejection cases (bad R:R), edge cases (stop at entry price), normal flow (5+ positions through lifecycle).
+**Critical paths tested:**
+- Signal generation + R:R validation
+- Position sizing (risk calculation, share count)
+- Bracket order structure + fill polling
+- Slippage rejection (R:R degradation)
+- Trailing stop activation + updates
+- All-or-nothing exits (stop + target)
+- Portfolio state persistence (load/save)
+- Edge cases: empty portfolio, max positions, pause logic
 
-Test verifies 6 key properties (see test output):
-1. Position sizing scales to 1% risk per trade
-2. Signals with R:R < 2.0x are rejected
-3. Partial exits execute at target, stop moves to breakeven
-4. Trailing stops activate after 1R profit
-5. Circuit breakers pause trading on 20% drawdown
-6. Final P&L math = R × position size × 1R dollar amount
+**Both test files verify end-to-end.** `test_simulation.py` is comprehensive; `test_executor.py` focuses on execution logic.
 
-No assertions — visual output is the verdict.
+## Test Data Patterns
+
+**Reproducible synthetic:** `np.random.seed(hash(ticker) % 2**31)` ensures same price series per ticker across runs.
+
+**Hard-coded signals:** R:R ratios, stops, targets explicit in test data. Example: `Signal(entry=100, stop=95, target=110)` = 5% risk, 10% reward, R:R 2.0.
+
+**Timestamps:** `datetime.now()` or explicit ISO strings.
+
+**CSV validation:** Read trade_tracker CSV output post-test. `get_stats()` parses trades.csv to count wins, losses, sum P&L.
+
+**No fixtures.** Fresh state created per test via `_reset_state()` and helpers.
+
+## Test Data Safety
+
+**Before running `test_simulation.py`:** Read comments. It sandboxes to temp dir — real positions.json/trades.csv never touched.
+
+**After running:** Temp dir auto-cleaned via `atexit.register(shutil.rmtree)`.
+
+**Check results:** Final output shows `Passed: N, Failed: M`. If M > 0, review failures and re-run to debug.
+
+**Integration test (test_simulation.py):** Full pipeline (scan, risk, execute, monitor, report) with synthetic data. Slowest but most comprehensive.
+
+**Unit test (test_executor.py):** Focused on bracket orders, slippage, reconciliation. Faster, more targeted.
