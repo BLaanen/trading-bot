@@ -13,14 +13,15 @@ This means:
   - Wide stop (5% away) → smaller position
   - But the DOLLAR RISK is always the same: 1% of portfolio
 
-Trailing stop logic:
-  1. Price reaches 1R profit  → start trailing stop
-  2. Price reaches target     → sell half, move stop to breakeven
-  3. Remaining half           → trail 3% behind the high water mark
-  4. Stop hit at any point    → exit immediately
+Exit logic (all-or-nothing via bracket orders at broker):
+  - Broker handles exits: stop-loss and take-profit are bracket children
+  - Python trails stops up as backup (1R profit → start trailing)
+  - Stop hit → exit all shares immediately
+  - Target hit → exit all shares immediately
 """
 
 import json
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -42,15 +43,14 @@ class Position:
     entry_date: str
     high_water_mark: float = 0.0    # Highest price since entry
     trailing: bool = False          # Whether trailing stop is active
-    partial_exit_done: bool = False  # Whether we sold half at target
-    original_shares: int = 0        # Shares at entry (before partial)
     regime_at_entry: str = ""       # Market regime when this position was opened (for learning loop)
+    bracket_order_id: str = ""      # Parent bracket order ID from Alpaca
+    stop_order_id: str = ""         # Child stop-loss order ID
+    target_order_id: str = ""       # Child take-profit order ID
 
     def __post_init__(self):
         if self.high_water_mark == 0:
             self.high_water_mark = self.current_price
-        if self.original_shares == 0:
-            self.original_shares = self.shares
 
     @property
     def market_value(self) -> float:
@@ -119,14 +119,15 @@ class PortfolioState:
 
 @dataclass
 class RiskDecision:
-    action: str  # "APPROVE", "REJECT", "EXIT_FULL", "EXIT_PARTIAL", "TRAIL", "PAUSE"
+    action: str  # "APPROVE", "REJECT", "EXIT_FULL", "TRAIL", "PAUSE"
     reason: str
     adjusted_shares: int = 0
     new_stop: float = 0.0
     severity: str = "INFO"  # INFO, WARNING, CRITICAL
 
 
-POSITIONS_FILE = Path(__file__).parent / "positions.json"
+_STATE_DIR = Path(os.environ.get("TRADING_STATE_DIR", str(Path(__file__).parent)))
+POSITIONS_FILE = _STATE_DIR / "positions.json"
 
 
 def save_positions(state: PortfolioState):
@@ -148,8 +149,9 @@ def save_positions(state: PortfolioState):
                 "entry_date": p.entry_date,
                 "high_water_mark": p.high_water_mark,
                 "trailing": p.trailing,
-                "partial_exit_done": p.partial_exit_done,
-                "original_shares": p.original_shares,
+                "bracket_order_id": p.bracket_order_id,
+                "stop_order_id": p.stop_order_id,
+                "target_order_id": p.target_order_id,
             }
             for p in state.positions
         ],
@@ -168,7 +170,11 @@ def load_positions() -> PortfolioState:
     with open(POSITIONS_FILE) as f:
         data = json.load(f)
 
-    positions = [Position(**p) for p in data.get("positions", [])]
+    positions = []
+    for p in data.get("positions", []):
+        p.pop("partial_exit_done", None)
+        p.pop("original_shares", None)
+        positions.append(Position(**p))
     return PortfolioState(
         total_value=data["total_value"],
         cash=data["cash"],
@@ -294,19 +300,7 @@ def update_trailing_stops(state: PortfolioState, config: AgentConfig) -> list[Ri
                 severity="INFO",
             ))
 
-        # Phase 2: Partial exit at target
-        if not pos.partial_exit_done and pos.hit_target:
-            exit_shares = int(pos.shares * config.partial_exit_pct)
-            if exit_shares >= 1:
-                decisions.append(RiskDecision(
-                    action="EXIT_PARTIAL",
-                    reason=f"{pos.ticker}: Target hit at ${pos.current_price:.2f} "
-                           f"({pos.r_multiple:.1f}R). Selling {exit_shares} of {pos.shares} shares.",
-                    adjusted_shares=exit_shares,
-                    severity="INFO",
-                ))
-
-        # Phase 3: Trail the stop up
+        # Phase 2: Trail the stop up
         if pos.trailing:
             trail_stop = pos.high_water_mark * (1 - config.trail_distance_pct)
             # Stop can only move UP, never down
@@ -494,13 +488,12 @@ def print_portfolio_status(state: PortfolioState, config: AgentConfig):
         print(f"  {'─'*7} {'─'*4} {'─'*8} {'─'*8} {'─'*8} {'─'*8} {'─'*5} {'─'*7} {'─'*5}")
         for p in state.positions:
             trail_mark = ">>>" if p.trailing else ""
-            partial_mark = " (½)" if p.partial_exit_done else ""
             pos_risk = max(0, p.current_price - p.stop_loss) * p.shares
             risk_label = f"${pos_risk:,.0f}" if pos_risk > 0 else "FREE"
             print(
                 f"  {p.ticker:<7} {p.shares:>4} ${p.entry_price:>7.2f} ${p.current_price:>7.2f} "
                 f"${p.stop_loss:>7.2f} ${p.pnl:>+7.0f} {p.r_multiple:>+4.1f}R "
-                f"{risk_label:>7} {trail_mark}{partial_mark}"
+                f"{risk_label:>7} {trail_mark}"
             )
     print(f"  Positions:  {len(state.positions):>10} / {config.max_open_positions}")
 

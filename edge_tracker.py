@@ -17,6 +17,7 @@ You need to know WHICH of your strategies is working NOW.
 """
 
 import json
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -81,7 +82,8 @@ class TradeRecord:
     regime: str = ""
 
 
-EDGE_FILE = Path(__file__).parent / "edge_tracker.json"
+_STATE_DIR = Path(os.environ.get("TRADING_STATE_DIR", str(Path(__file__).parent)))
+EDGE_FILE = _STATE_DIR / "edge_tracker.json"
 
 
 def _load() -> dict[str, StrategyStats]:

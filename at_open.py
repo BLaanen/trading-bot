@@ -245,6 +245,12 @@ def main():
         print("  Re-run without --dry-run to actually execute.")
         return
 
+    # Reconcile with broker before any trading
+    from reconcile import reconcile_with_broker
+    if not reconcile_with_broker(config):
+        print("\n  ABORTING — reconciliation failed. Fix the mismatch first.")
+        return
+
     # Use the orchestrator's filter + execute flow
     from orchestrator import step_filter, step_execute, step_monitor, step_report
     from strategy_validator import validate_all

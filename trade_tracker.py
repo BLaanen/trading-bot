@@ -10,8 +10,9 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-TRADES_FILE = Path(__file__).parent / "trades.csv"
-PORTFOLIO_FILE = Path(__file__).parent / "portfolio_value.csv"
+_STATE_DIR = Path(os.environ.get("TRADING_STATE_DIR", str(Path(__file__).parent)))
+TRADES_FILE = _STATE_DIR / "trades.csv"
+PORTFOLIO_FILE = _STATE_DIR / "portfolio_value.csv"
 
 CSV_HEADERS = [
     "date", "ticker", "action", "shares", "price", "total",

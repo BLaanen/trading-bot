@@ -49,8 +49,11 @@ from edge_tracker import (
     is_strategy_enabled, should_time_stop, record_trade,
     print_edge_report, get_strategy_ranking,
 )
+from reconcile import reconcile_with_broker
 
-LAST_RUN_FILE = Path(__file__).parent / "last_run.json"
+import os
+_STATE_DIR = Path(os.environ.get("TRADING_STATE_DIR", str(Path(__file__).parent)))
+LAST_RUN_FILE = _STATE_DIR / "last_run.json"
 
 
 def load_last_run() -> dict:
@@ -191,10 +194,14 @@ def step_execute(signals: list[Signal], config: AgentConfig, max_trades: int = 3
 
 
 def step_monitor(config: AgentConfig):
-    """Step 5: Update prices → trail stops → partial exits → time stops."""
+    """Step 5: Update prices → reconcile → check bracket exits → time stops."""
     print("\n" + "=" * 70)
     print("  STEP 5: POSITION MANAGEMENT")
     print("=" * 70)
+
+    # Reconcile first
+    if not reconcile_with_broker(config):
+        print("  [WARN] Reconciliation failed — proceeding with caution")
 
     print("  Updating prices...")
     update_prices(config)
@@ -312,6 +319,16 @@ def run_full_pipeline(config: AgentConfig):
     print("=" * 70)
     regime = detect_regime(config)
     print_regime(regime)
+
+    # Step 0.5: Reconciliation — abort if local state doesn't match broker
+    print("\n" + "=" * 70)
+    print("  STEP 0.5: BROKER RECONCILIATION")
+    print("=" * 70)
+    if not reconcile_with_broker(config):
+        print("\n  ABORTING PIPELINE — reconciliation failed.")
+        print("  Fix the mismatch, then re-run.")
+        step_report(config, regime)
+        return
 
     # Step 1: Validate (run weekly or on first run)
     last_validate = last_run.get("last_validate")

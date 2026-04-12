@@ -28,11 +28,8 @@ A price below your entry where you'll exit the trade and accept the loss. Set be
 **Target**
 A price above your entry where you'll take profits. Usually set at 2R or 3R above entry (2x or 3x the amount you're risking).
 
-**Trailing stop**
-A stop-loss that moves up as the stock goes up, never down. Locks in profit automatically. The system starts trailing after the trade is +1R in profit.
-
-**Partial exit**
-Selling half (or some fraction) of your position when you hit the target, then letting the rest run with a trailing stop. This locks in a guaranteed winner on the half you sold while keeping upside on the rest. After a partial exit, the remaining stop usually moves to breakeven — the trade becomes "free."
+**Bracket order**
+A single order that creates three linked orders at the broker: the buy, a stop-loss child, and a take-profit child. When the buy fills, both children become active. Whichever child fills first automatically cancels the other. The broker handles exits — Python doesn't need to poll constantly.
 
 **Time stop**
 If a stock hasn't hit stop OR target after a set number of days (15 by default), close it. Dead money should get recycled into a better setup.
@@ -70,7 +67,7 @@ Find a stock in a long-term uptrend (above its 200-day moving average). When it 
 Buy sector ETFs (XLE for energy, XLK for tech, XLRE for real estate, etc.) when the whole sector is moving up. The idea: individual stock picks are risky; sector bets spread that risk.
 
 **POWERX**
-A Rob Hoffman setup with three confirming signals: RSI(7) is high (strong momentum), MACD histogram is positive and growing (momentum accelerating), and Stochastic %K is above %D (short-term strength). Only buy when all three agree. The idea: multiple confirmations filter out weak signals.
+A Markus Heitkoetter setup with three confirming signals: RSI(7) is high (strong momentum), MACD histogram is positive and growing (momentum accelerating), and Stochastic %K is above %D (short-term strength). Only buy when all three agree. Uses fixed percentage stop/target from the PowerX Optimizer (default: 1.5% stop / 4.5% target = R:R 3.0, the "Quick Trades" setting). Other available settings: Conservative (1.5/3.0), M&M Balanced (2.5/5.0), Position Trader (2.5/7.5). These are set in `config.py` via `powerx_stop_pct` and `powerx_target_pct`.
 
 ---
 
@@ -114,13 +111,16 @@ The regime check (`orchestrator.py --regime`) sets the multiplier that scales ev
 Fake money on Alpaca's simulated exchange. Real prices, real fills, realistic slippage — no real dollars at risk. This system runs in paper mode.
 
 **Slippage**
-The gap between the price you expected and the price you actually got. A market order might "slip" a few cents on a thin stock. The system accounts for this by using limit orders where possible.
+The gap between the price you expected and the price you actually got. A market order might "slip" a few cents on a thin stock. After a buy fills, the system checks whether slippage degraded the R:R ratio below 1.5. If so, it immediately closes the position ("slippage rejection") rather than holding a bad trade.
 
 **Fill**
-When your order actually executes. "Filled at $47.89" means you bought at $47.89.
+When your order actually executes. "Filled at $47.89" means you bought at $47.89. The system always uses the actual fill price from Alpaca for all calculations, never the scanner's planned price.
+
+**Reconciliation**
+Before any trading logic runs, the system compares its local positions.json against Alpaca's actual positions via API. If they disagree (different tickers, quantities, or entry prices), it refuses to trade until the mismatch is fixed. This prevents the local state from drifting away from reality.
 
 **Alpaca**
-The broker this system uses. Free, commission-free, has a paper trading account with $100,000 in fake money by default. The Python SDK is `alpaca-py`.
+The broker this system uses. Free, commission-free, has a paper trading account with $100,000 in fake money by default. The Python SDK is `alpaca-trade-api`.
 
 ---
 

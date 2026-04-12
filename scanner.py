@@ -544,18 +544,10 @@ def scan_powerx(ticker: str, config: AgentConfig) -> Signal | None:
 
     # ── All three confirmed. Build the signal. ──
 
-    # Stop: low of the entry bar (today's low)
-    entry_bar_low = float(low.iloc[-1])
-    atr = calc_atr(data)
-    atr_now = float(atr.iloc[-1]) if not pd.isna(atr.iloc[-1]) else latest_close * 0.02
-    stop_loss = entry_bar_low - atr_now * 0.1  # Tiny buffer below the low
-
-    risk = latest_close - stop_loss
-    if risk <= 0 or risk / latest_close > 0.05:
-        return None
-
-    # Target: 2x risk (the PowerX standard)
-    target = latest_close + risk * config.min_reward_risk
+    # Fixed percentage stop and target (Heitkoetter PowerX Optimizer style)
+    # Default: 1.5% stop / 4.5% target = R:R 3.0 ("Quick Trades")
+    stop_loss = latest_close * (1 - config.powerx_stop_pct)
+    target = latest_close * (1 + config.powerx_target_pct)
 
     signal = Signal(
         ticker=ticker,
@@ -567,10 +559,6 @@ def scan_powerx(ticker: str, config: AgentConfig) -> Signal | None:
         reason=f"Triple confirm: RSI(7)={rsi_now:.0f}, "
                f"MACD hist +{hist_now:.3f}, Stoch %K={k_now:.0f}>%D={d_now:.0f}",
     )
-
-    # Small tolerance for float rounding on stop/target
-    if signal.reward_risk < config.min_reward_risk - 0.05:
-        return None
 
     return signal
 

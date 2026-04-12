@@ -6,14 +6,26 @@ Generates realistic synthetic price data and runs the full system:
 
 This validates that all components wire together correctly and that
 the R:R math works as expected.
+
+All state files are written to a temporary directory so real
+positions.json / trades.csv / portfolio_value.csv are never touched.
 """
 
 import sys
+import os
 import json
+import tempfile
+import atexit
+import shutil
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from pathlib import Path
+
+# Sandbox: redirect all state files to a temp directory BEFORE importing
+_tmpdir = tempfile.mkdtemp(prefix="trading_test_")
+os.environ["TRADING_STATE_DIR"] = _tmpdir
+atexit.register(shutil.rmtree, _tmpdir, ignore_errors=True)
 
 # Add trading dir to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -27,10 +39,7 @@ from risk_manager import (
 )
 from trade_tracker import init_files, get_stats, TRADES_FILE, PORTFOLIO_FILE
 
-# Clean up any prior state
-for f in [POSITIONS_FILE, TRADES_FILE, PORTFOLIO_FILE]:
-    if f.exists():
-        f.unlink()
+print(f"  [SANDBOX] State files in: {_tmpdir}")
 
 
 def generate_trending_data(ticker: str, days: int = 200, start_price: float = 100,
@@ -222,7 +231,7 @@ decisions = update_trailing_stops(state, config)
 for d in decisions:
     print(f"  [TRAIL] {d.reason}")
 
-# Process exits
+# Process exits — all-or-nothing (no partial exits)
 positions_after = []
 for pos in state.positions:
     if pos.hit_stop:
@@ -236,22 +245,14 @@ for pos in state.positions:
             state.consecutive_losses = 0
         print(f"  [EXIT] {pos.ticker}: STOP at ${pos.current_price:.2f} "
               f"→ {r_result:+.1f}R (${pnl:+,.0f})")
-    elif not pos.partial_exit_done and pos.hit_target:
-        exit_shares = int(pos.shares * config.partial_exit_pct)
-        if exit_shares >= 1:
-            pnl_partial = exit_shares * (pos.current_price - pos.entry_price)
-            state.cash += exit_shares * pos.current_price
-            pos.shares -= exit_shares
-            pos.partial_exit_done = True
-            old_stop = pos.stop_loss
-            pos.stop_loss = pos.entry_price  # Move to breakeven
-            state.consecutive_losses = 0
-            r_at_exit = pos.r_multiple
-            print(f"  [PARTIAL] {pos.ticker}: Sold {exit_shares} shares at ${pos.current_price:.2f} "
-                  f"({r_at_exit:+.1f}R, +${pnl_partial:,.0f})")
-            print(f"            Stop moved ${old_stop:.2f} → ${pos.stop_loss:.2f} (breakeven)")
-            print(f"            {pos.shares} shares remaining, trailing")
-        positions_after.append(pos)
+    elif pos.hit_target:
+        pnl = pos.pnl
+        r_result = pos.r_multiple
+        state.cash += pos.shares * pos.current_price
+        state.total_r += r_result
+        state.consecutive_losses = 0
+        print(f"  [EXIT] {pos.ticker}: TARGET at ${pos.current_price:.2f} "
+              f"→ {r_result:+.1f}R (${pnl:+,.0f})")
     else:
         positions_after.append(pos)
 
@@ -260,13 +261,12 @@ state.total_value = state.cash + sum(p.market_value for p in state.positions)
 state.peak_value = max(state.peak_value, state.total_value)
 save_positions(state)
 
-# Scenario: Day 14 — Winners keep running, trailed out
-print("\n  ── Day 14: Winners run further, then trail stops catch ──")
+# Scenario: Day 14 — More winners hit targets
+print("\n  ── Day 14: More positions hit targets ──")
 price_moves_d14 = {
-    "AAPL": 210.00,   # Keeps running (remaining shares)
-    "NVDA": 895.00,   # Near target
-    "QQQ":  505.00,    # Strong
-    "MSFT": 445.00,    # Hit target
+    "NVDA": 895.00,   # Near target ($894)
+    "QQQ":  505.00,    # Above target ($504)
+    "MSFT": 445.00,    # Above target ($444)
 }
 
 for pos in state.positions:
@@ -282,21 +282,17 @@ decisions = update_trailing_stops(state, config)
 for d in decisions:
     print(f"  [TRAIL] {d.reason}")
 
-# Process remaining partial exits
+# Process target exits
 positions_final = []
 for pos in state.positions:
-    if not pos.partial_exit_done and pos.hit_target:
-        exit_shares = int(pos.shares * config.partial_exit_pct)
-        if exit_shares >= 1:
-            pnl_partial = exit_shares * (pos.current_price - pos.entry_price)
-            state.cash += exit_shares * pos.current_price
-            pos.shares -= exit_shares
-            pos.partial_exit_done = True
-            pos.stop_loss = pos.entry_price
-            r_at_exit = pos.r_multiple
-            print(f"  [PARTIAL] {pos.ticker}: Sold {exit_shares} at ${pos.current_price:.2f} "
-                  f"({r_at_exit:+.1f}R, +${pnl_partial:,.0f})")
-        positions_final.append(pos)
+    if pos.hit_target:
+        pnl = pos.pnl
+        r_result = pos.r_multiple
+        state.cash += pos.shares * pos.current_price
+        state.total_r += r_result
+        state.consecutive_losses = 0
+        print(f"  [EXIT] {pos.ticker}: TARGET at ${pos.current_price:.2f} "
+              f"→ {r_result:+.1f}R (${pnl:+,.0f})")
     else:
         positions_final.append(pos)
 
@@ -308,7 +304,6 @@ save_positions(state)
 # Final: trail out remaining positions
 print("\n  ── Day 18: Pullback, trail stops hit on remaining shares ──")
 price_moves_final = {
-    "AAPL": 203.00,   # Pulled back, trail stop catches
     "NVDA": 880.00,   # Pulled back
     "QQQ":  490.00,    # Pulled back from high
     "MSFT": 440.00,    # Pulled back
@@ -451,8 +446,8 @@ print("=" * 70)
 print(f"\n  The system correctly:")
 print(f"  - Sizes positions to risk exactly 1% per trade")
 print(f"  - Rejects signals with R:R below {config.min_reward_risk}x")
-print(f"  - Sells half at target, moves stop to breakeven")
-print(f"  - Trails remaining shares behind the high water mark")
+print(f"  - Exits ALL shares at target or stop (no partial exits)")
+print(f"  - Trails stops behind the high water mark")
 print(f"  - Triggers circuit breakers on drawdown and consecutive losses")
 print(f"  - Adapts position size: tight stop → more shares, wide → fewer")
 print(f"  - Reduces size after drawdown")

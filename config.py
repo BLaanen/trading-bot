@@ -63,9 +63,7 @@ class AgentConfig:
     # This is how winners become BIGGER than the initial target.
     trail_activation_r: float = 1.0    # Start trailing after 1R profit
     trail_distance_pct: float = 0.03   # Trail 3% behind the high
-    # Partial exit: sell half at initial target, trail the rest
-    partial_exit_pct: float = 0.50     # Sell 50% at target
-    move_stop_to_entry: bool = True    # After partial, stop → breakeven
+    # Bracket orders exit all shares at stop or target (no partial exits)
 
     # ── Position management ──
     max_position_pct: float = 0.10     # Max 10% of portfolio per position
@@ -95,6 +93,15 @@ class AgentConfig:
     powerx_stoch_slowing: int = 3
     powerx_min_volume: int = 500_000   # Min avg daily volume
     powerx_min_price: float = 10.0     # Min stock price
+    # PowerX Optimizer stop/target as fixed % of entry price.
+    # Settings from Heitkoetter's PowerX Optimizer:
+    #   Conservative:    1.5% risk / 3.0% reward (R:R 2.0)
+    #   Quick Trades:    1.5% risk / 4.5% reward (R:R 3.0)
+    #   M&M Balanced:    2.5% risk / 5.0% reward (R:R 2.0)
+    #   Position Trader: 2.5% risk / 7.5% reward (R:R 3.0)
+    # Default: Quick Trades (1.5/4.5) — 60% win rate in backtests, R:R 3.0
+    powerx_stop_pct: float = 0.015     # Stop 1.5% below entry
+    powerx_target_pct: float = 0.045   # Target 4.5% above entry
 
     # Trend filter (applied to ALL strategies)
     trend_ema: int = 50                # Must be above 50 EMA to go long
@@ -126,7 +133,7 @@ class AgentConfig:
     # Flip to False before live trading.
     paper_exploration_mode: bool = True
     exploration_max_positions: int = 6       # Up from 3 — more data per day
-    exploration_min_reward_risk: float = 1.7 # Down from 2.0 — accept marginal setups to test them
+    exploration_min_reward_risk: float = 2.0 # Match live mode — marginal R:R gets killed by slippage
     exploration_max_sector: int = 3          # Up from 2 — test correlation guard assumption
 
     # ── Alpaca paper trading ──

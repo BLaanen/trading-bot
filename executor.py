@@ -2,15 +2,16 @@
 Execution Agent
 
 Handles the full position lifecycle:
-  Entry    → sized by risk manager (1R per trade)
-  Monitor  → trailing stops, partial exits
-  Exit     → stop hit or trailed out
+  Entry  → bracket order (buy + stop-loss + take-profit) at the broker
+  Monitor → check if broker-side exits have filled, update local state
+  Exit   → broker handles exits via bracket children; Python is backup
 
 Supports Alpaca paper trading or simulated execution.
 """
 
 import os
 import json
+import time
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,7 +31,12 @@ try:
 except ImportError:
     HAS_ALPACA = False
 
-ORDER_LOG = Path(__file__).parent / "order_log.json"
+_STATE_DIR = Path(os.environ.get("TRADING_STATE_DIR", str(Path(__file__).parent)))
+ORDER_LOG = _STATE_DIR / "order_log.json"
+
+SLIPPAGE_RR_THRESHOLD = 1.5
+FILL_POLL_TIMEOUT = 30
+FILL_POLL_INTERVAL = 1
 
 
 @dataclass
@@ -42,6 +48,8 @@ class OrderResult:
     shares: int
     price: float
     message: str
+    stop_order_id: str = ""
+    target_order_id: str = ""
 
 
 def get_alpaca_client(config: AgentConfig):
@@ -51,7 +59,6 @@ def get_alpaca_client(config: AgentConfig):
         return None
     try:
         client = tradeapi.REST(api_key, api_secret, config.alpaca_base_url, api_version="v2")
-        # Validate connection on first use
         client.get_account()
         return client
     except Exception as e:
@@ -60,29 +67,82 @@ def get_alpaca_client(config: AgentConfig):
         return None
 
 
-def _submit_order(client, ticker: str, shares: int, side: str) -> OrderResult:
-    """Submit an order via Alpaca or simulate it."""
+def _wait_for_fill(client, order_id: str) -> tuple[str, float]:
+    """Poll Alpaca until the order fills or timeout. Returns (status, fill_price)."""
+    deadline = time.time() + FILL_POLL_TIMEOUT
+    while time.time() < deadline:
+        order = client.get_order(order_id)
+        if order.status == "filled":
+            return "filled", float(order.filled_avg_price)
+        if order.status in ("cancelled", "expired", "rejected"):
+            return order.status, 0.0
+        time.sleep(FILL_POLL_INTERVAL)
+    return "timeout", 0.0
+
+
+def _submit_bracket_order(client, ticker: str, shares: int, stop_price: float,
+                          target_price: float) -> OrderResult:
+    """Submit a bracket order via Alpaca: buy + stop-loss child + take-profit child."""
     if client:
         try:
             order = client.submit_order(
-                symbol=ticker, qty=shares, side=side,
-                type="market", time_in_force="day",
+                symbol=ticker, qty=shares, side="buy",
+                type="market", time_in_force="gtc",
+                order_class="bracket",
+                stop_loss={"stop_price": str(round(stop_price, 2))},
+                take_profit={"limit_price": str(round(target_price, 2))},
             )
-            return OrderResult(True, order.id, ticker, side.upper(), shares, 0,
-                               f"Alpaca {side}: {order.id}")
+            stop_id = ""
+            target_id = ""
+            if hasattr(order, "legs") and order.legs:
+                for leg in order.legs:
+                    if leg.type == "stop":
+                        stop_id = leg.id
+                    elif leg.type == "limit":
+                        target_id = leg.id
+
+            return OrderResult(
+                True, order.id, ticker, "BUY", shares, 0,
+                f"Alpaca bracket: {order.id}",
+                stop_order_id=stop_id,
+                target_order_id=target_id,
+            )
         except Exception as e:
-            return OrderResult(False, "", ticker, side.upper(), shares, 0,
-                               f"Alpaca error: {e}")
+            return OrderResult(False, "", ticker, "BUY", shares, 0,
+                               f"Alpaca bracket error: {e}")
 
     order_id = f"SIM-{datetime.now().strftime('%Y%m%d%H%M%S')}-{ticker}"
-    return OrderResult(True, order_id, ticker, side.upper(), shares, 0,
-                       f"Simulated {side}: {shares} {ticker}")
+    return OrderResult(
+        True, order_id, ticker, "BUY", shares, 0,
+        f"Simulated bracket buy: {shares} {ticker}",
+        stop_order_id=f"SIM-STOP-{ticker}",
+        target_order_id=f"SIM-TARGET-{ticker}",
+    )
+
+
+def _submit_sell(client, ticker: str, shares: int) -> OrderResult:
+    """Submit a plain market sell."""
+    if client:
+        try:
+            order = client.submit_order(
+                symbol=ticker, qty=shares, side="sell",
+                type="market", time_in_force="day",
+            )
+            return OrderResult(True, order.id, ticker, "SELL", shares, 0,
+                               f"Alpaca sell: {order.id}")
+        except Exception as e:
+            return OrderResult(False, "", ticker, "SELL", shares, 0,
+                               f"Alpaca sell error: {e}")
+
+    order_id = f"SIM-{datetime.now().strftime('%Y%m%d%H%M%S')}-{ticker}"
+    return OrderResult(True, order_id, ticker, "SELL", shares, 0,
+                       f"Simulated sell: {shares} {ticker}")
 
 
 # ─── Entry ───────────────────────────────────────────────────────────────────
 
 def process_signal(signal: Signal, config: AgentConfig, regime_name: str = "") -> OrderResult | None:
-    """Evaluate signal → size position → execute entry."""
+    """Evaluate signal → size position → bracket order → wait for fill → validate R:R."""
     state = load_positions()
     decision = evaluate_new_trade(signal, state, config)
     print(f"\n  [{decision.severity}] {decision.reason}")
@@ -91,52 +151,121 @@ def process_signal(signal: Signal, config: AgentConfig, regime_name: str = "") -
         return None
 
     client = get_alpaca_client(config)
-    result = _submit_order(client, signal.ticker, decision.adjusted_shares, "buy")
-    result.price = signal.entry_price
+    result = _submit_bracket_order(
+        client, signal.ticker, decision.adjusted_shares,
+        stop_price=signal.stop_loss, target_price=signal.target,
+    )
     print(f"  → {result.message}")
 
-    if result.success:
-        new_pos = Position(
-            ticker=signal.ticker,
-            shares=decision.adjusted_shares,
-            entry_price=signal.entry_price,
-            current_price=signal.entry_price,
-            stop_loss=signal.stop_loss,
-            initial_stop=signal.stop_loss,
-            target=signal.target,
-            strategy=signal.strategy,
-            entry_date=datetime.now().strftime("%Y-%m-%d"),
-        )
-        # Tag the position with the regime at entry (for learning loop autopsy)
-        if regime_name:
-            new_pos.regime_at_entry = regime_name
-        state.positions.append(new_pos)
-        state.cash -= decision.adjusted_shares * signal.entry_price
-        state.total_value = state.cash + sum(p.market_value for p in state.positions)
-        state.trades_since_pause += 1
-        save_positions(state)
+    if not result.success:
+        _log_order(result)
+        return result
 
+    # Wait for the buy leg to fill and get actual price
+    actual_fill_price = signal.entry_price  # fallback for simulated mode
+    if client:
+        status, fill_price = _wait_for_fill(client, result.order_id)
+        if status != "filled":
+            print(f"  [WARN] Buy order {status} for {signal.ticker}")
+            _log_order(result)
+            return OrderResult(False, result.order_id, signal.ticker, "BUY",
+                               decision.adjusted_shares, 0,
+                               f"Buy {status}: {result.order_id}")
+        actual_fill_price = fill_price
+        print(f"  → Filled at ${actual_fill_price:.2f} (signal was ${signal.entry_price:.2f})")
+
+    result.price = actual_fill_price
+
+    # Post-fill R:R re-validation
+    new_risk = actual_fill_price - signal.stop_loss
+    new_reward = signal.target - actual_fill_price
+    if new_risk > 0:
+        new_rr = new_reward / new_risk
+    else:
+        new_rr = 0
+
+    if new_rr < SLIPPAGE_RR_THRESHOLD:
+        print(f"  [SLIPPAGE_REJECT] R:R dropped to {new_rr:.2f} (threshold {SLIPPAGE_RR_THRESHOLD})")
+        # Cancel bracket children
+        if client:
+            for child_id in [result.stop_order_id, result.target_order_id]:
+                if child_id:
+                    try:
+                        client.cancel_order(child_id)
+                    except Exception:
+                        pass
+        # Immediate market sell
+        sell_result = _submit_sell(client, signal.ticker, decision.adjusted_shares)
+        sell_price = actual_fill_price  # approximate for logging
+        if client and sell_result.success:
+            sell_status, sp = _wait_for_fill(client, sell_result.order_id)
+            if sell_status == "filled":
+                sell_price = sp
+        sell_result.price = sell_price
+
+        pnl = (sell_price - actual_fill_price) * decision.adjusted_shares
+        log_trade(
+            ticker=signal.ticker, action="SELL",
+            shares=decision.adjusted_shares, price=sell_price,
+            strategy=signal.strategy, outcome="SLIPPAGE_REJECT", pnl=pnl,
+            notes=f"R:R {new_rr:.2f} < {SLIPPAGE_RR_THRESHOLD} after fill at ${actual_fill_price:.2f}",
+            regime=regime_name,
+        )
         log_trade(
             ticker=signal.ticker, action="BUY",
-            shares=decision.adjusted_shares, price=signal.entry_price,
+            shares=decision.adjusted_shares, price=actual_fill_price,
             strategy=signal.strategy, stop_loss=signal.stop_loss,
-            target=signal.target, notes=signal.reason,
+            target=signal.target, notes=f"Slippage rejected — filled ${actual_fill_price:.2f}",
             regime=regime_name,
         )
         _log_order(result)
+        _log_order(sell_result)
+        print(f"  → Slippage reject: sold at ${sell_price:.2f}, P&L ${pnl:+.2f}")
+        return sell_result
+
+    # Valid fill — record the position with actual fill price
+    new_pos = Position(
+        ticker=signal.ticker,
+        shares=decision.adjusted_shares,
+        entry_price=actual_fill_price,
+        current_price=actual_fill_price,
+        stop_loss=signal.stop_loss,
+        initial_stop=signal.stop_loss,
+        target=signal.target,
+        strategy=signal.strategy,
+        entry_date=datetime.now().strftime("%Y-%m-%d"),
+        bracket_order_id=result.order_id,
+        stop_order_id=result.stop_order_id,
+        target_order_id=result.target_order_id,
+    )
+    if regime_name:
+        new_pos.regime_at_entry = regime_name
+    state.positions.append(new_pos)
+    state.cash -= decision.adjusted_shares * actual_fill_price
+    state.total_value = state.cash + sum(p.market_value for p in state.positions)
+    state.trades_since_pause += 1
+    save_positions(state)
+
+    log_trade(
+        ticker=signal.ticker, action="BUY",
+        shares=decision.adjusted_shares, price=actual_fill_price,
+        strategy=signal.strategy, stop_loss=signal.stop_loss,
+        target=signal.target, notes=signal.reason,
+        regime=regime_name,
+    )
+    _log_order(result)
 
     return result
 
 
-# ─── Position management (the important part) ───────────────────────────────
+# ─── Position management ─────────────────────────────────────────────────────
 
 def manage_positions(config: AgentConfig) -> list[OrderResult]:
     """
-    The core loop that runs every cycle:
-      1. Update prices
-      2. Update trailing stops
-      3. Process partial exits
-      4. Process full exits (stops)
+    Monitor loop (runs every 30 min):
+      1. Check if any bracket children have filled at the broker
+      2. Update trailing stops (backup — broker handles primary exits)
+      3. Process any locally detected stop hits (safety net)
     """
     state = load_positions()
     if not state.positions:
@@ -145,59 +274,67 @@ def manage_positions(config: AgentConfig) -> list[OrderResult]:
     results = []
     client = get_alpaca_client(config)
 
-    # Step 1: Update trailing stops (moves stops up, flags partial exits)
+    # Step 1: Check broker for filled bracket children
+    if client:
+        positions_after_broker = []
+        for pos in state.positions:
+            filled_child = _check_bracket_children(client, pos)
+            if filled_child:
+                order_id, fill_price, exit_type = filled_child
+                pnl = (fill_price - pos.entry_price) * pos.shares
+                r_result = (fill_price - pos.entry_price) / (pos.entry_price - pos.initial_stop) if pos.entry_price != pos.initial_stop else 0
+
+                if pnl < 0:
+                    state.consecutive_losses += 1
+                    outcome = "LOSS"
+                else:
+                    state.consecutive_losses = 0
+                    outcome = "WIN" if exit_type == "target" else "WIN_TRAILED"
+
+                state.cash += pos.shares * fill_price
+                state.total_r += r_result
+
+                log_trade(
+                    ticker=pos.ticker, action="SELL", shares=pos.shares,
+                    price=fill_price, strategy=pos.strategy,
+                    outcome=outcome, pnl=pnl,
+                    notes=f"Bracket {exit_type} at {r_result:+.1f}R (broker-side)",
+                )
+                result = OrderResult(True, order_id, pos.ticker, "SELL",
+                                     pos.shares, fill_price,
+                                     f"Bracket {exit_type}: {order_id}")
+                _log_order(result)
+                results.append(result)
+                print(f"  [EXIT] {pos.ticker}: {outcome} at {r_result:+.1f}R "
+                      f"(${pnl:+,.0f}) — broker {exit_type}")
+            else:
+                positions_after_broker.append(pos)
+        state.positions = positions_after_broker
+    else:
+        # Simulated mode: use local stop/target checking
+        positions_after_broker = state.positions
+
+    # Step 2: Update trailing stops (local backup)
     trail_decisions = update_trailing_stops(state, config)
     for d in trail_decisions:
         print(f"  [TRAIL] {d.reason}")
 
-    # Step 2: Process partial exits
+    # Step 3: Local stop check (safety net for simulated mode or broker lag)
     positions_after = []
     for pos in state.positions:
-        if not pos.partial_exit_done and pos.hit_target:
-            exit_shares = int(pos.shares * config.partial_exit_pct)
-            if exit_shares >= 1:
-                result = _submit_order(client, pos.ticker, exit_shares, "sell")
-                result.price = pos.current_price
-
-                if result.success:
-                    pnl = exit_shares * (pos.current_price - pos.entry_price)
-                    state.cash += exit_shares * pos.current_price
-                    pos.shares -= exit_shares
-                    pos.partial_exit_done = True
-                    # Safety: if partial exit leaves 0 shares, mark for full exit
-                    if pos.shares < 1:
-                        pos.shares = 0
-
-                    # Move stop to breakeven on remaining shares
-                    if config.move_stop_to_entry:
-                        pos.stop_loss = pos.entry_price
-
-                    r_earned = pos.r_multiple
-                    state.consecutive_losses = 0
-                    state.total_r += r_earned * (exit_shares / pos.original_shares)
-
-                    log_trade(
-                        ticker=pos.ticker, action="SELL", shares=exit_shares,
-                        price=pos.current_price, strategy=pos.strategy,
-                        outcome="WIN_PARTIAL", pnl=pnl,
-                        notes=f"Partial exit at {r_earned:.1f}R, {pos.shares} shares remain",
-                    )
-                    _log_order(result)
-                    results.append(result)
-                    print(f"  [PARTIAL] Sold {exit_shares} {pos.ticker} at {r_earned:.1f}R "
-                          f"(+${pnl:.0f}), stop → ${pos.stop_loss:.2f}")
-
-            positions_after.append(pos)
-
-        elif pos.hit_stop:
-            # Full exit on stop
-            result = _submit_order(client, pos.ticker, pos.shares, "sell")
-            result.price = pos.current_price
+        if pos.hit_stop:
+            result = _submit_sell(client, pos.ticker, pos.shares)
+            sell_price = pos.current_price
+            if client and result.success:
+                status, sp = _wait_for_fill(client, result.order_id)
+                if status == "filled":
+                    sell_price = sp
+            result.price = sell_price
 
             if result.success:
-                pnl = pos.pnl
+                pnl = (sell_price - pos.entry_price) * pos.shares
                 r_result = pos.r_multiple
-                state.cash += pos.shares * pos.current_price
+                state.cash += pos.shares * sell_price
 
                 if pnl < 0:
                     state.consecutive_losses += 1
@@ -210,13 +347,40 @@ def manage_positions(config: AgentConfig) -> list[OrderResult]:
 
                 log_trade(
                     ticker=pos.ticker, action="SELL", shares=pos.shares,
-                    price=pos.current_price, strategy=pos.strategy,
+                    price=sell_price, strategy=pos.strategy,
                     outcome=outcome, pnl=pnl,
-                    notes=f"Stop hit at {r_result:+.1f}R",
+                    notes=f"Local stop at {r_result:+.1f}R",
                 )
                 _log_order(result)
                 results.append(result)
                 print(f"  [EXIT] {pos.ticker}: {outcome} at {r_result:+.1f}R (${pnl:+,.0f})")
+            else:
+                positions_after.append(pos)
+        elif pos.hit_target:
+            result = _submit_sell(client, pos.ticker, pos.shares)
+            sell_price = pos.current_price
+            if client and result.success:
+                status, sp = _wait_for_fill(client, result.order_id)
+                if status == "filled":
+                    sell_price = sp
+            result.price = sell_price
+
+            if result.success:
+                pnl = (sell_price - pos.entry_price) * pos.shares
+                r_result = pos.r_multiple
+                state.cash += pos.shares * sell_price
+                state.consecutive_losses = 0
+                state.total_r += r_result
+
+                log_trade(
+                    ticker=pos.ticker, action="SELL", shares=pos.shares,
+                    price=sell_price, strategy=pos.strategy,
+                    outcome="WIN", pnl=pnl,
+                    notes=f"Target hit at {r_result:+.1f}R",
+                )
+                _log_order(result)
+                results.append(result)
+                print(f"  [EXIT] {pos.ticker}: WIN at {r_result:+.1f}R (${pnl:+,.0f})")
             else:
                 positions_after.append(pos)
         else:
@@ -226,7 +390,6 @@ def manage_positions(config: AgentConfig) -> list[OrderResult]:
     state.total_value = state.cash + sum(p.market_value for p in state.positions)
     state.peak_value = max(state.peak_value, state.total_value)
 
-    # Check if we need to pause
     health = check_portfolio_health(state, config)
     for d in health:
         if d.action == "PAUSE" and not state.paused_until:
@@ -236,6 +399,20 @@ def manage_positions(config: AgentConfig) -> list[OrderResult]:
 
     save_positions(state)
     return results
+
+
+def _check_bracket_children(client, pos: Position) -> tuple[str, float, str] | None:
+    """Check if a bracket child order (stop or target) has filled at the broker."""
+    for order_id, exit_type in [(pos.stop_order_id, "stop"), (pos.target_order_id, "target")]:
+        if not order_id:
+            continue
+        try:
+            order = client.get_order(order_id)
+            if order.status == "filled":
+                return order_id, float(order.filled_avg_price), exit_type
+        except Exception:
+            pass
+    return None
 
 
 # ─── Price updates ───────────────────────────────────────────────────────────
@@ -292,7 +469,7 @@ if __name__ == "__main__":
     update_prices(config)
     results = manage_positions(config)
     if results:
-        print(f"\n  Managed {len(results)} exits/partials")
+        print(f"\n  Managed {len(results)} exits")
 
     signals = run_full_scan(config)
     for signal in signals[:3]:

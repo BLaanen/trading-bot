@@ -22,7 +22,16 @@ From those five files you can answer: what's open, what happened today, is the s
 
 ## The pipeline in one paragraph
 
-`orchestrator.py` is the brain. It runs in modes selected by flags: `--regime` decides market mood (bullish/sideways/bearish), `--scan` finds setups across 5 strategies, `--validate` backtests them before trusting signals, `--execute` places orders, `--monitor` trails stops and triggers exits, `--report` shows portfolio state, `--edge` shows which strategies are actually earning. With no flag, it runs the full pipeline: Regime → Validate → Scan → Filter → Execute → Monitor → Rebalance → Report. The shell wrappers (`at_open.sh`, `monitor.sh`, `eod.sh`) call the orchestrator with the right flags for their time slot.
+`orchestrator.py` is the brain. It runs in modes selected by flags: `--regime` decides market mood (bullish/sideways/bearish), `--scan` finds setups across 5 strategies, `--validate` backtests them before trusting signals, `--execute` places bracket orders (buy + stop-loss + take-profit at the broker), `--monitor` checks if bracket exits have fired and applies time stops, `--report` shows portfolio state, `--edge` shows which strategies are actually earning. With no flag, it runs the full pipeline: Regime → Reconcile → Validate → Scan → Filter → Execute → Monitor → Rebalance → Report.
+
+**Key architecture (rewritten 2026-04-12):**
+- **Bracket orders:** Every buy goes to Alpaca as `order_class='bracket'` with stop-loss and take-profit children. The broker handles exits. Python is backup.
+- **No partial exits:** All shares exit at stop or target. Simpler, cleaner data for the learning loop.
+- **Actual fill prices:** After a buy fills, the system queries Alpaca for `filled_avg_price` and uses THAT everywhere.
+- **Slippage rejection:** If fill price degrades R:R below 1.5, the position is immediately closed and logged as SLIPPAGE_REJECT.
+- **Reconciliation:** Before any trading, `reconcile.py` compares positions.json against Alpaca's actual positions. Mismatch = refuse to trade.
+
+The shell wrappers (`at_open.sh`, `monitor.sh`, `eod.sh`) call the orchestrator with the right flags for their time slot.
 
 ## The 5 scanner strategies
 
@@ -42,9 +51,9 @@ Three launchd agents in `~/Library/LaunchAgents/` handle all automation. Cron wa
 
 | Time (CEST) | Time (ET) | Agent | Script | Purpose |
 |---|---|---|---|---|
-| 15:25 daily | 09:25 | `com.bopeterlaanen.trading.at_open` | `at_open.sh` | Wait for open, scan, filter, enter up to 6 trades |
-| Every 5 min | Every 5 min | `com.bopeterlaanen.trading.monitor` | `monitor.sh` | Trail stops, partial/full exits. Silent no-op when market closed. |
-| 22:10 daily | 16:10 | `com.bopeterlaanen.trading.eod` | `eod.sh` | Learning loop autopsy of closed trades, daily + weekly reports |
+| 15:25 daily | 09:25 | `com.bopeterlaanen.trading.at_open` | `at_open.sh` | Wait for open, reconcile, scan, place bracket orders |
+| 18:30 daily | 12:30 | `com.bopeterlaanen.trading.monitor` | `monitor.sh` | Midday: check bracket exits, time stops, reconcile |
+| 22:10 daily | 16:10 | `com.bopeterlaanen.trading.eod` | `eod.sh` | Final monitor + learning loop + daily/weekly reports |
 
 US market hours: 15:30–22:00 CEST / 09:30–16:00 ET, Mon–Fri.
 
@@ -70,7 +79,7 @@ Paper mode is hardcoded in `config.py` via `alpaca_paper: bool = True`. Do NOT f
 
 ## Making changes safely
 
-The monitor runs every 5 minutes during market hours (15:30–22:00 CEST). Any change to a Python file that breaks an import, renames a function, or moves a file will cause the next scheduled run to fail and you may miss exits on open positions.
+The monitor runs once daily at 18:30 CEST (12:30 ET midday). The eod script runs at 22:10 CEST. Since bracket orders at the broker handle stop-loss and take-profit exits, a missed monitor run won't cause missed exits — but it will delay local state updates. Any change to a Python file that breaks an import will cause the next scheduled run to fail.
 
 **Before making code changes during market hours:**
 1. Check if market is open: `TZ=America/New_York date` — if between 09:30 and 16:00 ET Mon–Fri, market is open
@@ -85,6 +94,7 @@ Run these from inside the trading directory with Python 3.11+:
 
 ```bash
 python test_simulation.py              # Offline end-to-end test, synthetic data
+python test_executor.py                # Bracket order, slippage, reconciliation tests
 python orchestrator.py --regime        # Just the regime check
 python orchestrator.py --scan          # Just the scanner (no orders)
 python orchestrator.py --report        # Portfolio dashboard

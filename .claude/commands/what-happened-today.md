@@ -21,7 +21,7 @@ What did the regime check say (bullish/sideways/bearish)? How many signals did t
 Which trades actually got placed, at what prices, for which strategies? If there were rejections (correlation guard, heat cap, already open), note them.
 
 **Paragraph 3 — Intraday action**
-What did the monitor do throughout the day? Any trailing stop moves? Any partial exits hit? Any full exits or stop-outs? Any alerts or warnings in the log?
+What did the monitor find? Did any bracket exits fire at the broker (stop-loss or take-profit children)? Any time stops applied? Any reconciliation warnings? Any errors in the log?
 
 **Paragraph 4 — End of day state**
 What's open heading into the next session? What's the P&L for today (realized + unrealized)? Any positions close to stops or targets?

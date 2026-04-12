@@ -17,9 +17,9 @@ Steps:
 
 3. Report which agents are now loaded and the next scheduled run for each:
    - `at_open`: next run at 15:25 CEST on next trading day
-   - `monitor`: next run in <=5 min
+   - `monitor`: runs daily at 18:30 CEST (12:30 ET midday) on trading days
    - `eod`: next run at 22:10 CEST
 
-4. If the market is currently open, note: "Monitor will fire within 5 minutes and resume trailing stops on your open positions."
+4. Note: "Bracket orders at the broker handle stop-loss and take-profit exits. The monitor checks for filled exits and applies time stops."
 
 5. Confirm no issues by running `/status` immediately after to verify the system is healthy.
