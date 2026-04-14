@@ -27,8 +27,8 @@ from scanner import Signal
 from risk_manager import Position, PortfolioState, load_positions, save_positions
 from executor import (
     process_signal, manage_positions, _submit_bracket_order,
-    _check_bracket_children, _submit_sell, OrderResult,
-    SLIPPAGE_RR_THRESHOLD,
+    _check_bracket_children, _submit_sell, _replace_stop_order,
+    OrderResult, SLIPPAGE_RR_THRESHOLD,
 )
 from reconcile import reconcile_with_broker
 from trade_tracker import init_files, TRADES_FILE
@@ -225,8 +225,22 @@ state = load_positions()
 check("Position removed", len(state.positions) == 0)
 check("Cash updated", state.cash > 4000)
 
-# ─── Test 6: Reconciliation catches mismatch ──────────────────────────────
+# ─── Test 6: Reconciliation auto-fix ─────────────────────────────────────
 print("\n── Test 6: Reconciliation ──")
+
+@dataclass
+class MockPosition:
+    symbol: str
+    qty: str
+    avg_entry_price: str
+    market_value: str
+    current_price: str = "100.00"
+
+class MockAccount:
+    cash: str = "10000.00"
+    portfolio_value: str = "15000.00"
+
+# Test 6a: Local has position, broker doesn't → auto-remove from local
 _reset_state()
 state = load_positions()
 state.positions.append(Position(
@@ -236,34 +250,34 @@ state.positions.append(Position(
 ))
 save_positions(state)
 
-# Mock Alpaca returning no positions (broker has nothing)
 mock_client4 = MagicMock()
 mock_client4.list_positions.return_value = []
+mock_client4.get_account.return_value = MockAccount()
 
 with patch("reconcile.tradeapi.REST", return_value=mock_client4):
     with patch.dict(os.environ, {"ALPACA_API_KEY": "test", "ALPACA_API_SECRET": "test"}):
         result = reconcile_with_broker(AgentConfig())
 
-check("Mismatch detected", result is False)
+check("Auto-fix removes stale local position", result is True)
+state_after = load_positions()
+check("FAKE position removed", all(p.ticker != "FAKE" for p in state_after.positions))
 
-# Now test matching positions
-@dataclass
-class MockPosition:
-    symbol: str
-    qty: str
-    avg_entry_price: str
-    market_value: str
+# Test 6b: Broker has position, local doesn't → auto-add to local
+_reset_state()
 
 mock_client5 = MagicMock()
 mock_client5.list_positions.return_value = [
-    MockPosition(symbol="FAKE", qty="50", avg_entry_price="100.00", market_value="5000.00"),
+    MockPosition(symbol="FAKE", qty="50", avg_entry_price="100.00", market_value="5000.00", current_price="100.00"),
 ]
+mock_client5.get_account.return_value = MockAccount()
 
 with patch("reconcile.tradeapi.REST", return_value=mock_client5):
     with patch.dict(os.environ, {"ALPACA_API_KEY": "test", "ALPACA_API_SECRET": "test"}):
         result = reconcile_with_broker(AgentConfig())
 
-check("Match passes", result is True)
+check("Auto-fix adds broker position to local", result is True)
+state_after = load_positions()
+check("FAKE position added", any(p.ticker == "FAKE" for p in state_after.positions))
 
 # ─── Test 7: All-or-nothing exits (no partial) ───────────────────────────
 print("\n── Test 7: All-or-nothing exit ──")
@@ -322,6 +336,258 @@ state = load_positions()
 check("Old format loads without error", len(state.positions) == 1)
 check("Ticker preserved", state.positions[0].ticker == "OLD")
 check("No partial_exit_done on loaded position", not hasattr(state.positions[0], "partial_exit_done") or True)
+
+# ═══════════════════════════════════════════════════════════════════════════
+print("\n" + "=" * 70)
+print("  TRAILING STOP BROKER SYNC TESTS")
+print("=" * 70)
+
+from risk_manager import RiskDecision, update_trailing_stops
+
+# ─── Test 10: Trailing stop broker replace — success ─────────────────────
+print("\n── Test 10: Trailing stop broker replace success ──")
+_reset_state(cash=5000)
+state = load_positions()
+state.positions.append(Position(
+    ticker="TRAIL1", shares=10, entry_price=100, current_price=115,
+    stop_loss=95, initial_stop=95, target=120, strategy="PULLBACK",
+    entry_date="2026-04-10", high_water_mark=115, trailing=True,
+    stop_order_id="STOP-TRAIL-1",
+))
+state.cash = 4000
+state.total_value = 5150
+save_positions(state)
+
+mock_trail_client = MagicMock()
+mock_trail_client.replace_order.return_value = MagicMock()
+mock_trail_client.get_order.return_value = MagicMock(status="accepted")
+mock_trail_client.get_account.return_value = MagicMock()
+mock_trail_client.list_positions.return_value = []
+
+config_trail = AgentConfig()
+config_trail.use_trailing_stops = True
+
+with patch("executor.get_alpaca_client", return_value=mock_trail_client):
+    results = manage_positions(config_trail)
+
+state_after = load_positions()
+trail_pos = next((p for p in state_after.positions if p.ticker == "TRAIL1"), None)
+expected_stop = round(115 * (1 - 0.05), 2)  # 109.25
+check("Stop updated after broker confirm", trail_pos is not None and trail_pos.stop_loss == expected_stop)
+check("replace_order called", mock_trail_client.replace_order.called)
+
+# ─── Test 11: Trailing stop broker replace — already filled ──────────────
+print("\n── Test 11: Trailing stop broker replace already filled ──")
+_reset_state(cash=5000)
+state = load_positions()
+state.positions.append(Position(
+    ticker="TRAIL2", shares=10, entry_price=100, current_price=115,
+    stop_loss=95, initial_stop=95, target=120, strategy="PULLBACK",
+    entry_date="2026-04-10", high_water_mark=115, trailing=True,
+    stop_order_id="STOP-TRAIL-2",
+))
+state.cash = 4000
+state.total_value = 5150
+save_positions(state)
+
+mock_filled_client = MagicMock()
+mock_filled_client.replace_order.side_effect = Exception("order already filled")
+_filled_call_count = [0]
+def _mock_get_order_filled(order_id):
+    _filled_call_count[0] += 1
+    m = MagicMock()
+    # First call is from _check_bracket_children — return accepted so position stays
+    # Second call is from _replace_stop_order failure path — return filled
+    m.status = "accepted" if _filled_call_count[0] <= 2 else "filled"
+    m.filled_avg_price = "110.00"
+    return m
+mock_filled_client.get_order.side_effect = _mock_get_order_filled
+mock_filled_client.get_account.return_value = MagicMock()
+mock_filled_client.list_positions.return_value = []
+
+with patch("executor.get_alpaca_client", return_value=mock_filled_client):
+    results = manage_positions(config_trail)
+
+state_after = load_positions()
+trail_pos = next((p for p in state_after.positions if p.ticker == "TRAIL2"), None)
+check("Stop NOT updated when already filled", trail_pos is not None and trail_pos.stop_loss == 95)
+
+# ─── Test 12: Trailing stop broker replace — other error ─────────────────
+print("\n── Test 12: Trailing stop broker replace error ──")
+_reset_state(cash=5000)
+state = load_positions()
+state.positions.append(Position(
+    ticker="TRAIL3", shares=10, entry_price=100, current_price=115,
+    stop_loss=95, initial_stop=95, target=120, strategy="PULLBACK",
+    entry_date="2026-04-10", high_water_mark=115, trailing=True,
+    stop_order_id="STOP-TRAIL-3",
+))
+state.cash = 4000
+state.total_value = 5150
+save_positions(state)
+
+mock_error_client = MagicMock()
+mock_error_client.replace_order.side_effect = Exception("network error")
+mock_pending_order = MagicMock()
+mock_pending_order.status = "pending_new"
+mock_error_client.get_order.return_value = mock_pending_order
+mock_error_client.get_account.return_value = MagicMock()
+mock_error_client.list_positions.return_value = []
+
+with patch("executor.get_alpaca_client", return_value=mock_error_client):
+    results = manage_positions(config_trail)
+
+state_after = load_positions()
+trail_pos = next((p for p in state_after.positions if p.ticker == "TRAIL3"), None)
+check("Stop NOT updated on error", trail_pos is not None and trail_pos.stop_loss == 95)
+
+# ─── Test 13: Double failure — replace fails AND get_order fails ─────────
+print("\n── Test 13: Trailing stop double failure ──")
+
+mock_double_fail = MagicMock()
+mock_double_fail.replace_order.side_effect = Exception("replace failed")
+mock_double_fail.get_order.side_effect = Exception("get_order also failed")
+
+success, reason = _replace_stop_order(mock_double_fail, "STOP-123", 110.0)
+check("Returns False on double failure", success is False)
+check("Reason is status_unknown", reason == "status_unknown")
+
+# ─── Test 14: No order ID — skip API call ────────────────────────────────
+print("\n── Test 14: Trailing stop no order ID ──")
+mock_no_id = MagicMock()
+
+success1, reason1 = _replace_stop_order(mock_no_id, "", 110.0)
+check("Empty ID returns False", success1 is False)
+check("Empty ID reason is no_order_id", reason1 == "no_order_id")
+
+success2, reason2 = _replace_stop_order(mock_no_id, "SIM-STOP-TEST", 110.0)
+check("SIM ID returns False", success2 is False)
+check("SIM ID reason is no_order_id", reason2 == "no_order_id")
+check("No API calls made", not mock_no_id.replace_order.called)
+
+# ─── Test 15: Trailing stops disabled ────────────────────────────────────
+print("\n── Test 15: Trailing stops disabled ──")
+_reset_state(cash=5000)
+state = load_positions()
+state.positions.append(Position(
+    ticker="TRAIL5", shares=10, entry_price=100, current_price=115,
+    stop_loss=95, initial_stop=95, target=120, strategy="PULLBACK",
+    entry_date="2026-04-10", high_water_mark=115, trailing=True,
+    stop_order_id="STOP-TRAIL-5",
+))
+state.cash = 4000
+state.total_value = 5150
+save_positions(state)
+
+mock_disabled_client = MagicMock()
+mock_disabled_client.get_order.return_value = MagicMock(status="accepted")
+mock_disabled_client.get_account.return_value = MagicMock()
+mock_disabled_client.list_positions.return_value = []
+
+config_disabled = AgentConfig()
+config_disabled.use_trailing_stops = False
+
+with patch("executor.get_alpaca_client", return_value=mock_disabled_client):
+    results = manage_positions(config_disabled)
+
+check("replace_order NOT called when disabled", not mock_disabled_client.replace_order.called)
+
+# ─── Test 16: Simulated mode — no broker call, direct update ─────────────
+print("\n── Test 16: Trailing stop simulated mode ──")
+_reset_state(cash=5000)
+state = load_positions()
+state.positions.append(Position(
+    ticker="TRAIL6", shares=10, entry_price=100, current_price=115,
+    stop_loss=95, initial_stop=95, target=120, strategy="PULLBACK",
+    entry_date="2026-04-10", high_water_mark=115, trailing=True,
+    stop_order_id="SIM-STOP-TRAIL6",
+))
+state.cash = 4000
+state.total_value = 5150
+save_positions(state)
+
+with patch("executor.get_alpaca_client", return_value=None):
+    results = manage_positions(config_trail)
+
+state_after = load_positions()
+trail_pos = next((p for p in state_after.positions if p.ticker == "TRAIL6"), None)
+expected_sim_stop = round(115 * (1 - 0.05), 2)
+check("Stop updated directly in sim mode", trail_pos is not None and trail_pos.stop_loss == expected_sim_stop)
+
+# ─── Test 17: Two positions both trailing — independent calls ────────────
+print("\n── Test 17: Two positions trailing independently ──")
+_reset_state(cash=5000)
+state = load_positions()
+state.positions.append(Position(
+    ticker="DUAL1", shares=10, entry_price=100, current_price=115,
+    stop_loss=95, initial_stop=95, target=130, strategy="PULLBACK",
+    entry_date="2026-04-10", high_water_mark=115, trailing=True,
+    stop_order_id="STOP-DUAL-1",
+))
+state.positions.append(Position(
+    ticker="DUAL2", shares=5, entry_price=200, current_price=225,
+    stop_loss=190, initial_stop=190, target=250, strategy="BREAKOUT",
+    entry_date="2026-04-10", high_water_mark=225, trailing=True,
+    stop_order_id="STOP-DUAL-2",
+))
+state.cash = 2000
+state.total_value = 4275
+save_positions(state)
+
+mock_dual_client = MagicMock()
+mock_dual_client.replace_order.return_value = MagicMock()
+mock_dual_client.get_order.return_value = MagicMock(status="accepted")
+mock_dual_client.get_account.return_value = MagicMock()
+mock_dual_client.list_positions.return_value = []
+
+with patch("executor.get_alpaca_client", return_value=mock_dual_client):
+    results = manage_positions(config_trail)
+
+check("replace_order called twice (one per position)", mock_dual_client.replace_order.call_count == 2)
+state_after = load_positions()
+d1 = next((p for p in state_after.positions if p.ticker == "DUAL1"), None)
+d2 = next((p for p in state_after.positions if p.ticker == "DUAL2"), None)
+check("DUAL1 stop updated", d1 is not None and d1.stop_loss == round(115 * 0.95, 2))
+check("DUAL2 stop updated", d2 is not None and d2.stop_loss == round(225 * 0.95, 2))
+
+# ─── Test 18: Exited position skipped for trailing ───────────────────────
+print("\n── Test 18: Exited position skipped for trailing ──")
+_reset_state(cash=5000)
+state = load_positions()
+state.positions.append(Position(
+    ticker="EXIT1", shares=10, entry_price=100, current_price=115,
+    stop_loss=95, initial_stop=95, target=120, strategy="PULLBACK",
+    entry_date="2026-04-10", high_water_mark=115, trailing=True,
+    stop_order_id="STOP-EXIT-1",
+    target_order_id="TARGET-EXIT-1",
+))
+state.cash = 4000
+state.total_value = 5150
+save_positions(state)
+
+mock_exit_client = MagicMock()
+
+mock_target_filled_order = MagicMock()
+mock_target_filled_order.status = "filled"
+mock_target_filled_order.filled_avg_price = "120.00"
+
+mock_stop_accepted = MagicMock()
+mock_stop_accepted.status = "accepted"
+
+def mock_get_order_exit(order_id):
+    if order_id == "TARGET-EXIT-1":
+        return mock_target_filled_order
+    return mock_stop_accepted
+
+mock_exit_client.get_order.side_effect = mock_get_order_exit
+mock_exit_client.get_account.return_value = MagicMock()
+mock_exit_client.list_positions.return_value = []
+
+with patch("executor.get_alpaca_client", return_value=mock_exit_client):
+    results = manage_positions(config_trail)
+
+check("Position exited via bracket", len(results) == 1)
+check("replace_order NOT called for exited position", not mock_exit_client.replace_order.called)
 
 # ═══════════════════════════════════════════════════════════════════════════
 print("\n" + "=" * 70)

@@ -124,6 +124,7 @@ class RiskDecision:
     adjusted_shares: int = 0
     new_stop: float = 0.0
     severity: str = "INFO"  # INFO, WARNING, CRITICAL
+    ticker: str = ""
 
 
 _STATE_DIR = Path(os.environ.get("TRADING_STATE_DIR", str(Path(__file__).parent)))
@@ -214,23 +215,25 @@ def calculate_open_risk(state: PortfolioState) -> float:
 
 def calculate_position_size(signal: Signal, state: PortfolioState, config: AgentConfig) -> int:
     """
-    Size the position through 4 constraints (takes the smallest):
+    Size the position through 5 constraints (takes the smallest):
 
-    1. RISK BUDGET: risk exactly 1% of portfolio per trade
-       → shares = $100 budget / $4.50 risk per share = 22 shares
+    1. RISK BUDGET (PowerX 2% rule): risk exactly 2% of portfolio per trade
+       → shares = $200 budget / $4.50 risk per share = 44 shares
 
-    2. MAX POSITION: no single position > 10% of portfolio
-       → shares = $1,000 max / $195 price = 5 shares
+    2. POSITION CAP: portfolio / max_positions — ensures all slots can be filled
+       → $10K / 6 positions = $1,667 max per position
+       → This is the key constraint that prevents one tight-stop trade
+         from eating the whole portfolio.
 
-    3. CASH AVAILABLE: always keep 15% cash reserve
-       → shares = available_cash / price
+    3. MAX POSITION: no single position > 10% of portfolio (safety cap)
 
-    4. TOTAL HEAT CAP: all open risk combined can't exceed 6%
-       → If you already have 4% at risk, you can only add 2% more
-       → But positions trailing at breakeven add 0% heat, so
-         winning trades free up room for new ones
+    4. CASH AVAILABLE: don't go below zero cash
 
-    The smallest of these 4 wins.
+    5. TOTAL HEAT CAP: all open risk combined can't exceed max_total_risk_pct
+       → Positions trailing at breakeven add 0% heat, so winning trades
+         free up room for new ones
+
+    The smallest of these 5 wins.
     """
     risk_budget = config.risk_at(state.total_value)
 
@@ -246,17 +249,21 @@ def calculate_position_size(signal: Signal, state: PortfolioState, config: Agent
     if risk_per_share <= 0:
         return 0
 
-    # Constraint 1: Per-trade risk budget (1% of portfolio)
+    # Constraint 1: Per-trade risk budget (2% of portfolio)
     shares_by_risk = int(risk_budget / risk_per_share)
 
-    # Constraint 2: Max single position size (10% of portfolio)
+    # Constraint 2: Position cap — portfolio / max_positions
+    # Ensures we can fill all position slots without running out of capital.
+    max_cost_per_position = state.total_value / config.max_open_positions
+    shares_by_cap = int(max_cost_per_position / signal.entry_price)
+
+    # Constraint 3: Max single position size (10% of portfolio, safety)
     shares_by_max_pos = int(state.total_value * config.max_position_pct / signal.entry_price)
 
-    # Constraint 3: Cash available after keeping reserve
-    available_cash = state.cash - state.total_value * config.cash_reserve_pct
-    shares_by_cash = int(available_cash / signal.entry_price) if available_cash > 0 else 0
+    # Constraint 4: Cash available (no reserve requirement — we want to be fully invested)
+    shares_by_cash = int(state.cash / signal.entry_price) if state.cash > 0 else 0
 
-    # Constraint 4: Total portfolio heat cap (6% of portfolio)
+    # Constraint 5: Total portfolio heat cap
     current_heat = calculate_open_risk(state)
     max_heat = state.total_value * config.max_total_risk_pct
     remaining_heat = max_heat - current_heat
@@ -265,7 +272,7 @@ def calculate_position_size(signal: Signal, state: PortfolioState, config: Agent
     shares_by_heat = int(remaining_heat / risk_per_share)
 
     # Take the most restrictive constraint
-    shares = min(shares_by_risk, shares_by_max_pos, shares_by_cash, shares_by_heat)
+    shares = min(shares_by_risk, shares_by_cap, shares_by_max_pos, shares_by_cash, shares_by_heat)
 
     if shares < 1:
         return 0
@@ -280,6 +287,9 @@ def update_trailing_stops(state: PortfolioState, config: AgentConfig) -> list[Ri
     Update stops for all open positions. This is the core of
     "let winners run, cut losers short."
     """
+    if not config.use_trailing_stops:
+        return []
+
     decisions = []
 
     for pos in state.positions:
@@ -298,21 +308,21 @@ def update_trailing_stops(state: PortfolioState, config: AgentConfig) -> list[Ri
                 action="TRAIL",
                 reason=f"{pos.ticker}: Trailing activated at {pos.r_multiple:.1f}R",
                 severity="INFO",
+                ticker=pos.ticker,
             ))
 
-        # Phase 2: Trail the stop up
+        # Phase 2: Trail the stop up (propose only — caller applies after broker confirm)
         if pos.trailing:
             trail_stop = pos.high_water_mark * (1 - config.trail_distance_pct)
-            # Stop can only move UP, never down
-            if trail_stop > pos.stop_loss:
-                old_stop = pos.stop_loss
-                pos.stop_loss = round(trail_stop, 2)
+            new_stop_price = round(trail_stop, 2)
+            if new_stop_price > pos.stop_loss:
                 decisions.append(RiskDecision(
                     action="TRAIL",
-                    reason=f"{pos.ticker}: Stop trailed ${old_stop:.2f} → ${pos.stop_loss:.2f} "
+                    reason=f"{pos.ticker}: Stop trailed ${pos.stop_loss:.2f} → ${new_stop_price:.2f} "
                            f"(HWM: ${pos.high_water_mark:.2f}, {pos.r_multiple:.1f}R)",
-                    new_stop=pos.stop_loss,
+                    new_stop=new_stop_price,
                     severity="INFO",
+                    ticker=pos.ticker,
                 ))
 
     return decisions

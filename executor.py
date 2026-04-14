@@ -139,6 +139,26 @@ def _submit_sell(client, ticker: str, shares: int) -> OrderResult:
                        f"Simulated sell: {shares} {ticker}")
 
 
+def _replace_stop_order(client, stop_order_id: str, new_stop_price: float) -> tuple[bool, str]:
+    """Replace a bracket stop-loss order at Alpaca with a new price."""
+    if not stop_order_id or stop_order_id.startswith("SIM"):
+        return (False, "no_order_id")
+    try:
+        client.replace_order(stop_order_id, stop_price=str(round(new_stop_price, 2)))
+        return (True, "replaced")
+    except Exception as e:
+        try:
+            order = client.get_order(stop_order_id)
+            if order.status == "filled":
+                return (False, "already_filled")
+            if order.status in ("canceled", "expired"):
+                return (False, f"order_{order.status}")
+            return (False, f"error: {e}")
+        except Exception as e2:
+            print(f"  [WARN] {stop_order_id}: replace failed and status check failed: {e2}")
+            return (False, "status_unknown")
+
+
 # ─── Entry ───────────────────────────────────────────────────────────────────
 
 def process_signal(signal: Signal, config: AgentConfig, regime_name: str = "") -> OrderResult | None:
@@ -314,10 +334,29 @@ def manage_positions(config: AgentConfig) -> list[OrderResult]:
         # Simulated mode: use local stop/target checking
         positions_after_broker = state.positions
 
-    # Step 2: Update trailing stops (local backup)
+    # Step 2: Update trailing stops and sync to broker
     trail_decisions = update_trailing_stops(state, config)
     for d in trail_decisions:
-        print(f"  [TRAIL] {d.reason}")
+        if d.new_stop and d.ticker:
+            pos = next((p for p in state.positions if p.ticker == d.ticker), None)
+            if not pos:
+                continue
+            if client:
+                old_stop = pos.stop_loss
+                success, reason = _replace_stop_order(client, pos.stop_order_id, d.new_stop)
+                if success:
+                    pos.stop_loss = d.new_stop
+                    save_positions(state)
+                    print(f"  [TRAIL] {d.ticker}: broker stop updated ${old_stop:.2f} → ${d.new_stop:.2f}")
+                elif reason == "already_filled":
+                    print(f"  [TRAIL] {d.ticker}: stop already filled — exit handled next cycle")
+                else:
+                    print(f"  [WARN] {d.ticker}: broker stop replace failed ({reason}) — original stop remains")
+            else:
+                pos.stop_loss = d.new_stop
+                print(f"  [TRAIL] {d.reason}")
+        else:
+            print(f"  [TRAIL] {d.reason}")
 
     # Step 3: Local stop check (safety net for simulated mode or broker lag)
     positions_after = []

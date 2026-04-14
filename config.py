@@ -1,15 +1,20 @@
 """
 Trading Agent Configuration
 
-Built around one principle: win ~50% of trades, but make winners
-bigger than losers. Every parameter serves asymmetric risk/reward.
+Built around the PowerX Strategy (Marcus Heitkoetter):
+  - Risk 2% of portfolio per trade (the "R")
+  - Stop loss at 1x ADR (or PXO-provided level)
+  - Profit target at 2x ADR (or PXO-provided level)
+  - Position size = min(risk_sizing, portfolio / max_positions)
+    → risk_sizing: shares = $risk / risk_per_share
+    → position_cap: shares = (portfolio / max_positions) / price
+    → take the SMALLER of the two to stay within budget
 
-The math:
-  - Risk 1% of portfolio per trade (the "R")
-  - Target 2-3R per winner
-  - At 50% win rate with 2.5R avg win / 1R avg loss:
-    10 trades = 5 wins (5 * 2.5R) + 5 losses (5 * 1R) = +7.5R net
-  - On $10K with 1% risk: 1R = $100, so +7.5R = +$750 per 10 trades
+The math (2% rule):
+  - Risk 2% of portfolio per trade
+  - At 60% win rate with 2:1 R:R avg:
+    10 trades = 6 wins (6 * 2R) + 4 losses (4 * 1R) = +8R net
+  - On $10K with 2% risk: 1R = $200, so +8R = +$1,600 per 10 trades
 """
 
 from dataclasses import dataclass, field
@@ -37,21 +42,18 @@ class AgentConfig:
     min_scan_volume: int = 500_000     # Min avg daily volume to scan
     min_scan_price: float = 5.0        # No penny stocks
 
-    # ── The core rule: risk per trade ──
+    # ── The core rule: risk per trade (PowerX 2% rule) ──
     # Every trade risks exactly this % of total portfolio.
     # This is the "1R" — the unit everything else is measured in.
-    risk_per_trade_pct: float = 0.01   # 1% of portfolio = 1R
+    # PowerX Strategy: 2% per trade, sized by ADR-based stop distance.
+    risk_per_trade_pct: float = 0.02   # 2% of portfolio = 1R
 
-    # ── Total portfolio risk cap (the Heitkoetter rule) ──
+    # ── Total portfolio risk cap ──
     # NEVER have more than this % of your account at risk at one time
     # across ALL open positions combined. This is your total "heat."
-    #
-    # With 1% per trade and 6% cap: max 6 trades at full risk.
-    # But some positions will have stops at breakeven (0% risk) after
-    # partial exits, so you can often carry more positions than
-    # 6% / 1% = 6, because winners on trailing stops aren't risking
-    # your original capital anymore.
-    max_total_risk_pct: float = 0.06   # 6% total portfolio heat cap
+    # With 2% per trade and 6 positions: theoretical max 12% heat,
+    # but position cap usually limits actual risk below this.
+    max_total_risk_pct: float = 0.12   # 12% total portfolio heat cap
 
     # ── Asymmetric targets ──
     # Minimum reward-to-risk ratio to take a trade.
@@ -59,16 +61,16 @@ class AgentConfig:
     min_reward_risk: float = 2.0
 
     # ── Trailing stop system ──
-    # After entry, the stop trails up to lock in profits.
-    # This is how winners become BIGGER than the initial target.
+    # When enabled, the stop trails up to lock in profits after 1R gain.
+    # When disabled (default), bracket orders handle all exits at the broker.
+    use_trailing_stops: bool = False
     trail_activation_r: float = 1.0    # Start trailing after 1R profit
-    trail_distance_pct: float = 0.03   # Trail 3% behind the high
-    # Bracket orders exit all shares at stop or target (no partial exits)
+    trail_distance_pct: float = 0.05   # Trail 5% behind the high
 
     # ── Position management ──
     max_position_pct: float = 0.10     # Max 10% of portfolio per position
     max_open_positions: int = 6        # Focused: fewer, better positions
-    cash_reserve_pct: float = 0.15     # Always keep 15% cash
+    cash_reserve_pct: float = 0.05     # Keep 5% cash reserve ($500 on $10K)
     max_sector_exposure: int = 2       # Max 2 positions in same sector
 
     # ── Strategy parameters ──
