@@ -25,6 +25,14 @@ trades.csv
 portfolio_value.csv
 order_log.json
 
+# Learning loop output (generated per-user from their trades)
+lessons.md
+patterns.json
+trade_journal.md
+hypotheses.md
+experiments.json
+analysis/backtest_slippage_results.csv
+
 # Logs
 logs/
 *.log

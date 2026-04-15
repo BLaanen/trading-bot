@@ -353,8 +353,12 @@ def manage_positions(config: AgentConfig) -> list[OrderResult]:
                 else:
                     print(f"  [WARN] {d.ticker}: broker stop replace failed ({reason}) — original stop remains")
             else:
-                pos.stop_loss = d.new_stop
-                print(f"  [TRAIL] {d.reason}")
+                if pos.stop_order_id and not pos.stop_order_id.startswith("SIM"):
+                    print(f"  [WARN] {d.ticker}: trailing stop NOT synced — no broker connection. "
+                          f"Broker stop remains at ${pos.stop_loss:.2f}, wanted ${d.new_stop:.2f}")
+                else:
+                    pos.stop_loss = d.new_stop
+                    print(f"  [TRAIL] {d.reason}")
         else:
             print(f"  [TRAIL] {d.reason}")
 
