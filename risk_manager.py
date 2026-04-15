@@ -261,8 +261,9 @@ def calculate_position_size(signal: Signal, state: PortfolioState, config: Agent
     # Constraint 3: Max single position size (10% of portfolio, safety)
     shares_by_max_pos = int(state.total_value * config.max_position_pct / signal.entry_price)
 
-    # Constraint 4: Cash available (no reserve requirement — we want to be fully invested)
-    shares_by_cash = int(state.cash / signal.entry_price) if state.cash > 0 else 0
+    # Constraint 4: Cash available after keeping reserve
+    available_cash = state.cash - state.total_value * config.cash_reserve_pct
+    shares_by_cash = int(available_cash / signal.entry_price) if available_cash > 0 else 0
 
     # Constraint 5: Total portfolio heat cap
     current_heat = calculate_open_risk(state)

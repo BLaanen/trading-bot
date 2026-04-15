@@ -84,14 +84,15 @@ def reconcile_with_broker(config: AgentConfig) -> bool:
             # Broker has it, we don't — add it to local state
             msg = f"ADDED {ticker}: {broker['qty']} shares @ ${broker['avg_entry']:.2f} (was at broker but missing locally)"
             corrections.append(msg)
+            default_stop = round(broker["avg_entry"] * 0.95, 2)
             new_positions.append(Position(
                 ticker=ticker,
                 shares=broker["qty"],
                 entry_price=broker["avg_entry"],
                 current_price=broker["current_price"],
-                stop_loss=0,  # Unknown — will need manual review or next monitor cycle
-                initial_stop=0,
-                target=0,
+                stop_loss=default_stop,
+                initial_stop=default_stop,
+                target=round(broker["avg_entry"] * 1.10, 2),
                 strategy="UNKNOWN_RECONCILED",
                 entry_date=datetime.now().strftime("%Y-%m-%d"),
                 high_water_mark=broker["current_price"],
@@ -102,8 +103,6 @@ def reconcile_with_broker(config: AgentConfig) -> bool:
             pnl = (local.current_price - local.entry_price) * local.shares
             msg = f"REMOVED {ticker}: {local.shares} shares (broker closed it, est P&L ${pnl:.2f})"
             corrections.append(msg)
-            # Reclaim the cash from the closed position
-            local_state.cash += local.current_price * local.shares
             # Don't add to new_positions — it's gone
 
         elif broker and local:
@@ -132,9 +131,9 @@ def reconcile_with_broker(config: AgentConfig) -> bool:
             _log_correction(c)
 
         local_state.positions = new_positions
-        # Recalculate total value
-        invested = sum(p.current_price * p.shares for p in new_positions)
-        local_state.total_value = local_state.cash + invested
+        # Use broker's authoritative cash and portfolio value
+        local_state.cash = float(acct.cash)
+        local_state.total_value = float(acct.portfolio_value)
         if local_state.total_value > local_state.peak_value:
             local_state.peak_value = local_state.total_value
         save_positions(local_state)

@@ -358,6 +358,9 @@ def manage_positions(config: AgentConfig) -> list[OrderResult]:
         else:
             print(f"  [TRAIL] {d.reason}")
 
+    if trail_decisions:
+        save_positions(state)
+
     # Step 3: Local stop check (safety net for simulated mode or broker lag)
     positions_after = []
     for pos in state.positions:

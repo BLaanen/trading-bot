@@ -40,6 +40,13 @@ credentials.json
 reports/*.html
 reports/*.pdf
 
+# Claude Code / planning (local tooling)
+.claude/
+.planning/.auto-state.json
+.planning/.auto-log.jsonl
+.planning/build/
+.planning/designs/
+
 # OS / editor
 .DS_Store
 Thumbs.db

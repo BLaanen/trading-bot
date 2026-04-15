@@ -279,6 +279,9 @@ with patch("reconcile.tradeapi.REST", return_value=mock_client5):
 check("Auto-fix adds broker position to local", result is True)
 state_after = load_positions()
 check("FAKE position added", any(p.ticker == "FAKE" for p in state_after.positions))
+fake_pos = next(p for p in state_after.positions if p.ticker == "FAKE")
+check("Reconciled position has non-zero stop", fake_pos.stop_loss > 0)
+check("Reconciled stop is 5% below entry", fake_pos.stop_loss == round(100.0 * 0.95, 2))
 
 # ─── Test 7: All-or-nothing exits (no partial) ───────────────────────────
 print("\n── Test 7: All-or-nothing exit ──")

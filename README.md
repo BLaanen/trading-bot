@@ -13,9 +13,18 @@ Algorithmic paper trading system for Alpaca, scanning 5 strategies across 300+ s
 
 ## Quickstart
 
-1. Clone the repo
-2. `pip install -r requirements.txt`
-3. Export your Alpaca keys to your shell profile (`~/.zshrc` or `~/.bashrc`):
+```bash
+git clone <repo-url> && cd trading
+./setup.sh
+```
+
+The setup script walks you through everything: checks Python 3.11+, installs dependencies, helps you set up Alpaca paper trading API keys, verifies the connection, and runs tests.
+
+Or do it manually:
+
+1. `pip install -r requirements.txt`
+2. Sign up at [Alpaca](https://app.alpaca.markets/signup) (free, no deposit for paper trading)
+3. Export your keys in `~/.zshrc` or `~/.bashrc`:
    ```bash
    export ALPACA_API_KEY="your-key"
    export ALPACA_API_SECRET="your-secret"
