@@ -56,3 +56,14 @@
 5. Document PowerX Optimizer integration (external tool, how to add picks)
 6. Add contributing guide (how to add a new strategy)
 7. Review all hardcoded paths for portability
+
+## Phase 6: Collaborator Onboarding
+**Goal:** Make the first-time experience excellent for someone who clones this repo. Help them choose a realistic starting amount, understand what paper trading is, know what markets they're trading, and learn how to use Claude Code effectively in the repo.
+
+### Milestones
+1. setup.sh asks for starting capital and writes user_config.json
+2. config.py reads user_config.json and overrides defaults
+3. README explains Alpaca's market scope (US stocks/ETFs, ADRs, no European exchanges)
+4. README has a "For Collaborators" section with slash commands and session management
+5. CLAUDE.md updated to reference user_config.json
+6. Paper trading concept explained during setup — why $100K vs your chosen budget

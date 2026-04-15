@@ -1,8 +1,8 @@
 # State
 
 ## Current Position
-- **Phase:** 5 — GitHub & Collaboration Readiness
-- **Plan:** 2
+- **Phase:** 6 — Collaborator Onboarding
+- **Plan:** 1
 - **Status:** All phases complete
 
 ## Completed
@@ -20,6 +20,7 @@
 - [x] Phase 3: Robustness improvements — scanner provider passthrough, universe prebuild with timeout, file permissions (0o600), 18 new tests
 - [x] Phase 4: Test coverage expansion — regime detection, step_filter, max trades capping tests
 - [x] Phase 5: GitHub readiness — README.md, CONTRIBUTING.md, SETUP-GUIDE.md updated
+- [x] Phase 6: Collaborator onboarding — user_config.json support, setup.sh capital selection, README market scope + collaborator guide, CLAUDE.md updates
 
 ## Pending
 - [ ] GitHub repo creation (manual — user decides when to push)

@@ -196,6 +196,30 @@ Decisions made without user input during planning. Review and override if needed
 **Rationale:** Telling contributors to register strategies that auto-register creates busywork and confusion when they can't find a registration point.
 **Confidence:** HIGH
 
+## DEC-016: user_config.json path resolution via __file__
+**Date:** 2026-04-15
+**Step:** plan-review Step B
+**Context:** Phase 6-01 Task 1 loads user_config.json in config.py __post_init__. Using os.getcwd() would break if orchestrator.py is invoked from a different directory.
+**Decision:** Use `pathlib.Path(__file__).parent / "user_config.json"` for path resolution.
+**Rationale:** Anchoring to config.py's location is the only reliable approach since the module can be imported from any working directory.
+**Confidence:** HIGH
+
+## DEC-017: Target multiplier derived from defaults, not hardcoded
+**Date:** 2026-04-15
+**Step:** plan-review Step B
+**Context:** Phase 6-01 scales target_capital proportionally when starting_capital changes. 2.5x multiplier matches current 10000→25000 defaults.
+**Decision:** Derive ratio as `default_target / default_starting` at the top of __post_init__ instead of hardcoding 2.5.
+**Rationale:** If defaults change in the future, the ratio stays correct automatically.
+**Confidence:** HIGH
+
+## DEC-018: setup.sh re-run detection for user_config.json
+**Date:** 2026-04-15
+**Step:** plan-review Step B
+**Context:** setup.sh is designed to be re-runnable (e.g., to update API keys). Without detection, re-running silently overwrites the user's starting capital choice.
+**Decision:** Check for existing user_config.json before prompting. Show current value and offer keep-or-change.
+**Rationale:** Users who re-run setup for one thing shouldn't lose their other settings.
+**Confidence:** HIGH
+
 ### D-002: Speculative plan validated: phase 3
 - **Category:** implementation
 - **Status:** ACTIVE
@@ -219,3 +243,11 @@ Decisions made without user input during planning. Review and override if needed
 - **Context:** No file overlap with predecessor phases (none)
 - **Decision:** Plan proceeds as-is (VALID)
 - **Affects:** Phase 5
+
+### D-005: Speculative plan validated: phase 6
+- **Category:** implementation
+- **Status:** ACTIVE
+- **Confidence:** HIGH
+- **Context:** No file overlap with predecessor phases (none)
+- **Decision:** Plan proceeds as-is (VALID)
+- **Affects:** Phase 6
