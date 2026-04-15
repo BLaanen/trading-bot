@@ -72,6 +72,23 @@ You should see `AlpacaProvider` as the data source instead of `YahooProvider`.
 - Change `alpaca_base_url` to `https://api.alpaca.markets`
 - **Real money. Do not do this until you've paper traded successfully.**
 
+## How Orders Work
+
+Every buy goes to Alpaca as a bracket order: one entry order with a stop-loss
+and take-profit attached. The broker handles exits automatically. The Python
+monitor is a backup that checks whether exits fired and updates local state.
+
+## PowerX Optimizer Integration
+
+The PowerX strategy can use external picks from the PowerX Optimizer tool. To add picks:
+
+1. Export your picks from the PowerX Optimizer
+2. Add tickers to the `tickers` array in `watchlist.json` (flat list — just append ticker symbols)
+3. The scanner will include these in the next scan cycle alongside the dynamic universe
+
+The system uses its own stop/target math (`powerx_stop_pct` and `powerx_target_pct`
+in config.py) regardless of what the Optimizer suggests.
+
 ## Step 5: Run the System
 
 ### Quick test (no network needed)
@@ -79,7 +96,7 @@ You should see `AlpacaProvider` as the data source instead of `YahooProvider`.
 python test_simulation.py
 ```
 Runs the full pipeline with synthetic data. Validates position sizing,
-trailing stops, partial exits, and circuit breakers.
+trailing stops, bracket orders, and circuit breakers.
 
 ### Check market regime
 ```bash
@@ -105,13 +122,13 @@ Backtests each strategy against historical data. Only strategies that pass
 ```bash
 python orchestrator.py
 ```
-Runs all 8 steps: Regime → Validate → Scan → Filter → Execute → Monitor → Rebalance → Report
+Runs the full pipeline: Regime → Reconcile → Scan → Filter → Execute → Monitor → Rebalance → Report
 
 ### Monitor open positions
 ```bash
 python orchestrator.py --monitor
 ```
-Updates prices, moves trailing stops, triggers partial/full exits.
+Updates prices, checks bracket order exits, applies time stops.
 **Run this every 4 hours during market hours.**
 
 ### View portfolio report
@@ -203,14 +220,16 @@ Here's what you might adjust based on paper trading results:
 | `data_provider.py` | Market data (Alpaca or Yahoo) |
 | `trade_tracker.py` | Trade journal (CSV log) |
 | `test_simulation.py` | Offline test of the full system |
+| `reconcile.py` | Validates local state vs broker positions |
+| `universe.py` | Dynamic stock universe from S&P 500 + NASDAQ-100 |
+| `at_open.py` | Market-open entry logic |
 
 ## What the System Does Automatically
 
 - **Sizes every position** so you risk exactly 1% ($100 on $10K)
 - **Rejects trades** that would push total heat above 6%
 - **Trails stops** up after 1R profit to lock in gains
-- **Sells half** at the target, trails the rest for bigger wins
-- **Moves stop to breakeven** after partial exit (free trade)
+- **Exits at stop-loss or take-profit** via bracket orders at the broker
 - **Pauses trading** after 4 consecutive losses (3-day cooldown)
 - **Halves position sizes** at 10% drawdown
 - **Stops all trading** at 20% drawdown
@@ -222,83 +241,22 @@ Here's what you might adjust based on paper trading results:
 
 ### Trailing Stop + Ladder Buys
 ```bash
-python trailing_ladder.py             # Run demo
+python strategies/trailing_ladder.py             # Run demo
 ```
 Buy a stock, set a trailing stop, and automatically buy more shares at dip levels.
 The floor only goes up. Ladder buys lower your average cost on dips.
 
 ### Copy Trading (Capitol Trades)
 ```bash
-python copy_trader.py                 # Run copy cycle (dry-run)
+python strategies/copy_trader.py                 # Run copy cycle (dry-run)
 ```
 Tracks US politician stock trades from Capitol Trades. Finds the most
 active/successful politician and copies their buys and sells automatically.
 
 ### Wheel Strategy (Options)
 ```bash
-python wheel_strategy.py              # Run simulated wheel cycle
+python strategies/wheel_strategy.py              # Run simulated wheel cycle
 ```
 Sell cash-secured puts → get assigned → sell covered calls → repeat.
 Collects premium income at every stage. Works in any market direction.
 
-### Automated Scheduler
-```bash
-python scheduler.py                   # Start all strategies on schedule
-```
-Runs all strategies during market hours on configurable intervals.
-Generates daily summaries at market close.
-
-### Notifications
-```bash
-python notifier.py                    # Demo all notification types
-```
-Console + file + Telegram (when configured) notifications for trades,
-alerts, and daily summaries.
-
-## Quick Start: All Strategies Running
-
-After setting up Alpaca API keys:
-```bash
-# 1. Test the system works
-python test_simulation.py
-
-# 2. Start the scheduler (runs everything automatically)
-python scheduler.py
-```
-
-The scheduler will run:
-- Full pipeline every 4 hours
-- Trailing stop monitor every 5 minutes
-- Copy trader check every 60 minutes
-- Wheel strategy check every 15 minutes
-- Daily report at market close
-
-## Key Files (Updated)
-
-| File | Purpose |
-|------|---------|
-| `config.py` | All tunable parameters |
-| `orchestrator.py` | Main pipeline (run this) |
-| `scanner.py` | Finds trade signals across 5 strategies |
-| `risk_manager.py` | Position sizing, stops, heat tracking |
-| `executor.py` | Places orders (paper or live) |
-| `regime.py` | Market regime detection |
-| `correlation_guard.py` | Prevents concentrated bets |
-| `edge_tracker.py` | Tracks which strategies are working |
-| `strategy_validator.py` | Backtests strategies before deployment |
-| `data_provider.py` | Market data (Alpaca or Yahoo) |
-| `trade_tracker.py` | Trade journal (CSV log) |
-| `test_simulation.py` | Offline test of the full system |
-| `trailing_ladder.py` | **NEW** Trailing stop + ladder buy strategy |
-| `copy_trader.py` | **NEW** Capitol Trades copy trading |
-| `wheel_strategy.py` | **NEW** Wheel strategy (options) |
-| `scheduler.py` | **NEW** Market hours automation |
-| `notifier.py` | **NEW** Multi-channel notifications |
-
-## What You Need to Do
-
-- **Run the scheduler** to automate everything during market hours
-- **Review the daily summary** at end of day
-- **Check the edge report** weekly — are strategies still working?
-- **Don't override the system** — if it says REJECT, don't force the trade
-- **Journal your observations** — what patterns do you notice?
