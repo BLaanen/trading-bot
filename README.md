@@ -15,7 +15,7 @@ This codebase is deliberately locked to paper mode. There is no "flip a switch t
 Every trading day, this system:
 
 1. **Checks the market mood** — is the broad market trending up, sideways, or down? This determines how aggressive the system should be.
-2. **Scans 300+ stocks** looking for specific patterns across 5 strategies (pullbacks, breakouts, moving average bounces, sector momentum, and a momentum triple-check called PowerX).
+2. **Scans ~100 liquid stocks** from the S&P 500 and NASDAQ-100 (plus sector ETFs) looking for specific patterns across 5 strategies (pullbacks, breakouts, moving average bounces, sector momentum, and a momentum triple-check called PowerX).
 3. **Filters the results** — rejects trades with bad risk/reward, blocks too much exposure to one sector, and respects portfolio-wide risk limits.
 4. **Places bracket orders** — each buy goes to Alpaca as a package deal: the buy itself, plus an automatic stop-loss (exit if you're wrong) and take-profit (exit if you're right). The broker handles the exits.
 5. **Monitors positions** during the day — checks if any exits have fired, updates trailing stops if enabled, and reconciles local records against the broker.
@@ -64,7 +64,8 @@ All scanning and trading happens during **US market hours**: 9:30 AM to 4:00 PM 
 ### Setup
 
 ```bash
-git clone <this-repo> && cd trading
+git clone https://github.com/BLaanen/trading-bot.git
+cd trading-bot
 ./setup.sh
 ```
 

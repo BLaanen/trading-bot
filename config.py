@@ -29,8 +29,8 @@ class AgentConfig:
     target_capital: float = 25_000
 
     # ── Universe ──
-    # Dynamic universe: ~300-500 liquid stocks from S&P 500 + NASDAQ-100,
-    # filtered by volume and price. Rebuilt weekly by universe.py.
+    # Dynamic universe: liquid stocks from S&P 500 + NASDAQ-100 (~100 after
+    # volume/price filtering). Rebuilt weekly by universe.py.
     # These are fallbacks only — the scanner calls universe.get_scan_tickers()
     # which returns the full dynamic list.
     core_etfs: list[str] = field(default_factory=lambda: [

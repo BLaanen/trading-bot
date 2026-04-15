@@ -1,5 +1,17 @@
 # Trading System Setup Guide
 
+## Quick Start
+
+The fastest way to get running is the interactive setup script:
+
+```bash
+git clone https://github.com/BLaanen/trading-bot.git
+cd trading-bot
+./setup.sh
+```
+
+It handles Python checks, dependency installation, Alpaca API key configuration, starting capital selection, and test verification. The steps below explain what the script does and how to do things manually.
+
 ## What You Need
 
 | Component | Required? | Cost | Purpose |
@@ -11,7 +23,7 @@
 ## Step 1: Install Dependencies
 
 ```bash
-cd trading/
+cd trading-bot/
 pip install -r requirements.txt
 ```
 
@@ -48,7 +60,7 @@ source ~/.bashrc   # or source ~/.zshrc
 
 **Verify it works:**
 ```bash
-cd trading/
+cd trading-bot/
 python data_provider.py
 ```
 
@@ -108,8 +120,9 @@ Tells you: bullish, sideways, or bearish. This determines everything else.
 ```bash
 python orchestrator.py --scan
 ```
-Scans your universe (18 stocks + 6 ETFs) for trade setups across all 5
-strategies. Shows entry, stop, target, and R:R for each signal.
+Scans your universe (liquid stocks from S&P 500 + NASDAQ-100, plus sector
+ETFs — typically ~100 stocks after liquidity filtering) for trade setups
+across all 5 strategies. Shows entry, stop, target, and R:R for each signal.
 
 ### Validate strategies against backtests
 ```bash
@@ -226,8 +239,8 @@ Here's what you might adjust based on paper trading results:
 
 ## What the System Does Automatically
 
-- **Sizes every position** so you risk exactly 1% ($100 on $10K)
-- **Rejects trades** that would push total heat above 6%
+- **Sizes every position** so you risk exactly 2% of your portfolio per trade
+- **Rejects trades** that would push total heat above 12%
 - **Trails stops** up after 1R profit to lock in gains
 - **Exits at stop-loss or take-profit** via bracket orders at the broker
 - **Pauses trading** after 4 consecutive losses (3-day cooldown)
