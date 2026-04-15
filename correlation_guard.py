@@ -37,6 +37,15 @@ SECTOR_MAP = {
     "KLAC": "SEMIS", "SNPS": "SEMIS",
     # Consumer
     "AMZN": "CONSUMER", "TSLA": "CONSUMER", "NFLX": "CONSUMER",
+    "TPR": "CONSUMER", "SN": "CONSUMER", "TPB": "CONSUMER",
+    # Industrials / Aerospace
+    "ALK": "INDUSTRIALS", "RKLB": "INDUSTRIALS",
+    # Energy
+    "EFXT": "ENERGY", "EOSE": "ENERGY",
+    # Tech (non-semi)
+    "AMBA": "SEMIS", "HSAI": "TECH", "JMIA": "TECH",
+    # International ETFs
+    "EWY": "INTL_ETF",
     # ETFs
     "QQQ": "TECH_ETF", "SPY": "BROAD_ETF", "IWM": "BROAD_ETF",
     "SOXX": "SEMI_ETF", "SMH": "SEMI_ETF", "XLK": "TECH_ETF",

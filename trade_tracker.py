@@ -30,6 +30,7 @@ def init_files():
             with open(filepath, "w", newline="") as f:
                 writer = csv.writer(f)
                 writer.writerow(headers)
+            os.chmod(filepath, 0o600)
             print(f"  Created {filepath.name}")
 
 
@@ -80,6 +81,7 @@ def log_trade(
         if needs_header:
             writer.writerow(CSV_HEADERS)
         writer.writerow(row)
+    os.chmod(TRADES_FILE, 0o600)
     print(f"  Logged: {action.upper()} {shares} {ticker.upper()} @ ${price:.2f} = ${total:.2f}")
 
 
@@ -113,6 +115,7 @@ def log_portfolio_value(total_value: float, cash: float, notes: str = ""):
         if pf_needs_header:
             writer.writerow(PORTFOLIO_HEADERS)
         writer.writerow(row)
+    os.chmod(PORTFOLIO_FILE, 0o600)
     print(f"  Portfolio: ${total_value:,.2f} (Cash: ${cash:,.2f}, Invested: ${invested:,.2f})")
     if daily_return:
         print(f"  Daily return: {daily_return:+.2f}%")

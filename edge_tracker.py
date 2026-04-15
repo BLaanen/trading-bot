@@ -134,6 +134,7 @@ def _save(stats: dict[str, StrategyStats]):
         }
     with open(EDGE_FILE, "w") as f:
         json.dump(data, f, indent=2)
+    os.chmod(EDGE_FILE, 0o600)
 
 
 def record_trade(strategy: str, r_multiple: float, hold_days: int = 0):

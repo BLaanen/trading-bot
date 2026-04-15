@@ -292,6 +292,7 @@ def main():
         last_run["last_validate"] = datetime.now().isoformat()
         last_run["approved"] = approved
         last_run_file.write_text(json.dumps(last_run, indent=2))
+        os.chmod(last_run_file, 0o600)
     else:
         approved = last_run.get("approved", {})
         print(f"\n  Using cached validation ({days_since_validate} days old)")
@@ -325,13 +326,13 @@ def main():
 
     if not args.skip_eod:
         # Step 5.5: Learning Loop — analyze today's closed trades and update lessons/patterns
-        from learning_loop import run_full_loop
+        from analysis.learning_loop import run_full_loop
         run_step("STEP 8: LEARNING LOOP", run_full_loop)
 
         # Step 5.6: Weekly Report — generate on Fridays (or last trading day of the week)
         today = datetime.now()
         if today.weekday() == 4:  # Friday = 4
-            from weekly_report import generate_report
+            from analysis.weekly_report import generate_report
             iso = today.isocalendar()
             def _gen():
                 path = generate_report(iso.year, iso.week)
@@ -339,7 +340,7 @@ def main():
             run_step("STEP 9: WEEKLY REPORT", _gen)
 
         # Step 5.7: Show current adaptive config status
-        from adaptive_config import show_status as show_adaptive_status
+        from analysis.adaptive_config import show_status as show_adaptive_status
         run_step("STEP 10: ADAPTIVE CONFIG STATUS", show_adaptive_status)
     else:
         print("\n  [SKIP] Learning loop & weekly report skipped (run eod.sh after market close)")
@@ -347,6 +348,7 @@ def main():
     # Save run metadata
     last_run["last_run"] = datetime.now().isoformat()
     last_run_file.write_text(json.dumps(last_run, indent=2))
+    os.chmod(last_run_file, 0o600)
 
     # Step 6: Optionally start the scheduler
     if not args.no_scheduler:
@@ -359,9 +361,9 @@ def start_scheduler(config):
     print("  Leave this terminal open, or run in tmux/screen for background operation.")
     print()
     try:
-        from scheduler import Scheduler
-        from run_all import setup_strategies
-        from notifier import get_notifier, NotificationLevel
+        from legacy.scheduler import Scheduler
+        from legacy.run_all import setup_strategies
+        from legacy.notifier import get_notifier, NotificationLevel
 
         scheduler = Scheduler()
         setup_strategies(scheduler, config)

@@ -20,12 +20,17 @@ the cached list is used so scans are fast.
 """
 
 import json
+import logging
+import os
+import signal
 import time
 import pandas as pd
 from datetime import datetime, timedelta
 from pathlib import Path
 
 from data_provider import get_provider
+
+logger = logging.getLogger(__name__)
 
 CACHE_FILE = Path(__file__).parent / ".universe_cache.json"
 REFRESH_DAYS = 7  # Rebuild universe weekly
@@ -206,6 +211,71 @@ def _filter_by_liquidity(
     return passed
 
 
+class _UniverseBuildTimeout(Exception):
+    pass
+
+
+def ensure_cache() -> dict | None:
+    """Ensure universe cache exists and is fresh. Returns cached data or None.
+
+    Uses signal.alarm for timeout — must run on main thread, before any
+    threaded network activity.
+    """
+    if CACHE_FILE.exists():
+        try:
+            with open(CACHE_FILE) as f:
+                cached = json.load(f)
+            built_at = datetime.fromisoformat(cached["built_at"])
+            if datetime.now() - built_at < timedelta(days=REFRESH_DAYS):
+                print(f"  [UNIVERSE] Cache fresh ({built_at.strftime('%Y-%m-%d')}), "
+                      f"{cached['count']} tickers")
+                return cached
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    # Cache is stale or missing — rebuild with timeout
+    old_handler = signal.getsignal(signal.SIGALRM)
+    try:
+        def _timeout_handler(signum, frame):
+            raise _UniverseBuildTimeout()
+
+        signal.signal(signal.SIGALRM, _timeout_handler)
+        signal.alarm(30)
+        result = build_universe(force_refresh=True)
+        signal.alarm(0)
+        return result
+    except _UniverseBuildTimeout:
+        logger.warning("Universe build timed out after 30s")
+        print("  [UNIVERSE] Build timed out (30s). ", end="")
+        # Try stale cache
+        if CACHE_FILE.exists():
+            try:
+                with open(CACHE_FILE) as f:
+                    stale = json.load(f)
+                print(f"Using stale cache ({stale['count']} tickers).")
+                return stale
+            except Exception:
+                pass
+        print("No cache available — scanner will use watchlist/fallback.")
+        return None
+    except Exception as e:
+        logger.warning("Universe build failed: %s", e)
+        print(f"  [UNIVERSE] Build failed: {e}. ", end="")
+        if CACHE_FILE.exists():
+            try:
+                with open(CACHE_FILE) as f:
+                    stale = json.load(f)
+                print(f"Using stale cache ({stale['count']} tickers).")
+                return stale
+            except Exception:
+                pass
+        print("No cache available — scanner will use watchlist/fallback.")
+        return None
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
+
+
 def build_universe(
     min_volume: int = 500_000,
     min_price: float = 5.0,
@@ -290,6 +360,7 @@ def build_universe(
     CACHE_FILE.parent.mkdir(exist_ok=True)
     with open(CACHE_FILE, "w") as f:
         json.dump(result, f, indent=2)
+    os.chmod(CACHE_FILE, 0o600)
 
     print(f"  [UNIVERSE] Universe built: {result['count']} total tickers "
           f"({len(tickers)} stocks + {len(CORE_ETFS) + len(SECTOR_ETFS)} ETFs)")

@@ -159,6 +159,7 @@ def save_positions(state: PortfolioState):
     }
     with open(POSITIONS_FILE, "w") as f:
         json.dump(data, f, indent=2)
+    os.chmod(POSITIONS_FILE, 0o600)
 
 
 def load_positions() -> PortfolioState:

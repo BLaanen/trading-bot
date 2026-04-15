@@ -497,6 +497,7 @@ def _log_order(result: OrderResult):
     })
     with open(ORDER_LOG, "w") as f:
         json.dump(orders, f, indent=2)
+    os.chmod(ORDER_LOG, 0o600)
 
 
 if __name__ == "__main__":

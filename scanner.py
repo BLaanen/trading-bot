@@ -66,10 +66,11 @@ def _get_provider():
     return _provider
 
 
-def fetch_data(ticker: str, period: str = "1y") -> pd.DataFrame | None:
+def fetch_data(ticker: str, period: str = "1y", provider=None) -> pd.DataFrame | None:
     """Fetch OHLCV data via the unified data provider."""
     try:
-        data = _get_provider().get_bars(ticker, period=period)
+        p = provider if provider is not None else _get_provider()
+        data = p.get_bars(ticker, period=period)
         if data.empty or len(data) < 60:
             return None
         return data
@@ -179,8 +180,8 @@ def is_uptrend(data: pd.DataFrame, config: AgentConfig) -> bool:
 # Why it works: you're buying weakness in strength. The stop is tight
 # because support is close. The target is wide because the trend is up.
 
-def scan_pullback(ticker: str, config: AgentConfig) -> Signal | None:
-    data = fetch_data(ticker)
+def scan_pullback(ticker: str, config: AgentConfig, provider=None) -> Signal | None:
+    data = fetch_data(ticker, provider=provider)
     if data is None or not is_uptrend(data, config):
         return None
 
@@ -253,8 +254,8 @@ def scan_pullback(ticker: str, config: AgentConfig) -> Signal | None:
 # Why it works: tight ranges = stored energy. When the breakout comes,
 # the move is often fast. Stop is tight (bottom of range), target is wide.
 
-def scan_consolidation_breakout(ticker: str, config: AgentConfig) -> Signal | None:
-    data = fetch_data(ticker)
+def scan_consolidation_breakout(ticker: str, config: AgentConfig, provider=None) -> Signal | None:
+    data = fetch_data(ticker, provider=provider)
     if data is None or not is_uptrend(data, config):
         return None
 
@@ -328,8 +329,8 @@ def scan_consolidation_breakout(ticker: str, config: AgentConfig) -> Signal | No
 # "institutional buy zone" — big funds buy dips to the 50.
 # Stop below the 50 EMA. Target at recent highs or 2R+.
 
-def scan_ma_bounce(ticker: str, config: AgentConfig) -> Signal | None:
-    data = fetch_data(ticker)
+def scan_ma_bounce(ticker: str, config: AgentConfig, provider=None) -> Signal | None:
+    data = fetch_data(ticker, provider=provider)
     if data is None:
         return None
 
@@ -400,12 +401,12 @@ def scan_ma_bounce(ticker: str, config: AgentConfig) -> Signal | None:
 # Stop is ATR-based. Target is trend continuation.
 # This is the "rising tide" approach — be in the sectors that are working.
 
-def scan_sector_momentum(ticker: str, config: AgentConfig) -> Signal | None:
+def scan_sector_momentum(ticker: str, config: AgentConfig, provider=None) -> Signal | None:
     # Only run on sector ETFs
     if ticker not in config.sector_etfs and ticker not in config.core_etfs:
         return None
 
-    data = fetch_data(ticker)
+    data = fetch_data(ticker, provider=provider)
     if data is None or not is_uptrend(data, config):
         return None
 
@@ -481,8 +482,8 @@ def scan_sector_momentum(ticker: str, config: AgentConfig) -> Signal | None:
 # when momentum (RSI), trend (MACD), and cycle (%K/%D) all agree.
 # The entry-bar stop is tight, giving good R:R naturally.
 
-def scan_powerx(ticker: str, config: AgentConfig) -> Signal | None:
-    data = fetch_data(ticker)
+def scan_powerx(ticker: str, config: AgentConfig, provider=None) -> Signal | None:
+    data = fetch_data(ticker, provider=provider)
     if data is None:
         return None
 
@@ -565,7 +566,7 @@ def scan_powerx(ticker: str, config: AgentConfig) -> Signal | None:
 
 # ─── Scanner orchestration ───────────────────────────────────────────────────
 
-def run_full_scan(config: AgentConfig) -> list[Signal]:
+def run_full_scan(config: AgentConfig, provider=None) -> list[Signal]:
     """Run all scanners. Only returns signals with R:R >= min_reward_risk."""
     try:
         from universe import get_scan_tickers
@@ -592,7 +593,7 @@ def run_full_scan(config: AgentConfig) -> list[Signal]:
         print(f"\n  {scanner_name}...", end=" ")
         count = 0
         for ticker in all_tickers:
-            signal = scanner_fn(ticker, config)
+            signal = scanner_fn(ticker, config, provider=provider)
             if signal:
                 signals.append(signal)
                 count += 1

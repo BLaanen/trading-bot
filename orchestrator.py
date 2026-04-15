@@ -66,6 +66,7 @@ def load_last_run() -> dict:
 def save_last_run(data: dict):
     with open(LAST_RUN_FILE, "w") as f:
         json.dump(data, f, indent=2)
+    os.chmod(LAST_RUN_FILE, 0o600)
 
 
 def step_validate(config: AgentConfig) -> dict[str, list[str]]:
@@ -87,13 +88,13 @@ def step_validate(config: AgentConfig) -> dict[str, list[str]]:
     return approved
 
 
-def step_scan(config: AgentConfig) -> list[Signal]:
+def step_scan(config: AgentConfig, provider=None) -> list[Signal]:
     """Step 2: Scan market for signals."""
     print("\n" + "=" * 70)
     print("  STEP 2: MARKET SCAN")
     print("=" * 70)
 
-    signals = run_full_scan(config)
+    signals = run_full_scan(config, provider=provider)
     return signals
 
 
@@ -344,8 +345,14 @@ def run_full_pipeline(config: AgentConfig):
         approved = last_run.get("approved", {})
         print(f"\n  Using cached validation from {days_since_validate} days ago")
 
+    # Pre-scan: ensure universe cache is fresh and init data provider once
+    from universe import ensure_cache
+    ensure_cache()
+    from data_provider import get_provider as _get_provider
+    provider = _get_provider()
+
     # Step 2: Scan
-    signals = step_scan(config)
+    signals = step_scan(config, provider=provider)
 
     # Step 3: Filter (now with regime, correlation, and edge checks)
     if approved:
