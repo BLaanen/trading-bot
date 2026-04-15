@@ -11,6 +11,7 @@ import json
 import tempfile
 import shutil
 import atexit
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from dataclasses import dataclass
@@ -588,6 +589,92 @@ with patch("executor.get_alpaca_client", return_value=mock_exit_client):
 
 check("Position exited via bracket", len(results) == 1)
 check("replace_order NOT called for exited position", not mock_exit_client.replace_order.called)
+
+# ═══════════════════════════════════════════════════════════════════════════
+# FILE PERMISSION TESTS (0o600)
+# ═══════════════════════════════════════════════════════════════════════════
+print("\n" + "=" * 70)
+print("  FILE PERMISSION TESTS (0o600)")
+print("=" * 70)
+
+# Test 19: positions.json permissions
+print("\n── Test 19: positions.json has 0o600 after save ──")
+_reset_state()
+from risk_manager import POSITIONS_FILE
+mode = os.stat(POSITIONS_FILE).st_mode & 0o777
+check("positions.json permissions == 0o600", mode == 0o600)
+
+# Test 20: order_log.json permissions
+print("\n── Test 20: order_log.json has 0o600 after write ──")
+from executor import _log_order, ORDER_LOG
+_log_order(OrderResult(True, "TEST-PERM", "PTEST", "BUY", 1, 100.0, "perm test"))
+mode = os.stat(ORDER_LOG).st_mode & 0o777
+check("order_log.json permissions == 0o600", mode == 0o600)
+
+# Test 21: trades.csv permissions
+print("\n── Test 21: trades.csv has 0o600 after log_trade ──")
+from trade_tracker import log_trade, TRADES_FILE as TF
+log_trade("PTEST", "BUY", 1, 100.0, strategy="TEST")
+mode = os.stat(TF).st_mode & 0o777
+check("trades.csv permissions == 0o600", mode == 0o600)
+
+# Test 22: edge_tracker.json permissions
+print("\n── Test 22: edge_tracker.json has 0o600 after record_trade ──")
+from edge_tracker import record_trade as et_record, EDGE_FILE
+et_record("TEST_STRAT", 1.5, 3)
+mode = os.stat(EDGE_FILE).st_mode & 0o777
+check("edge_tracker.json permissions == 0o600", mode == 0o600)
+
+# Test 23: last_run.json permissions
+print("\n── Test 23: last_run.json has 0o600 after save_last_run ──")
+from orchestrator import save_last_run, LAST_RUN_FILE
+save_last_run({"test": True})
+mode = os.stat(LAST_RUN_FILE).st_mode & 0o777
+check("last_run.json permissions == 0o600", mode == 0o600)
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SCANNER PROVIDER PASSTHROUGH TESTS
+# ═══════════════════════════════════════════════════════════════════════════
+print("\n" + "=" * 70)
+print("  SCANNER PROVIDER PASSTHROUGH TESTS")
+print("=" * 70)
+
+import pandas as pd
+import numpy as np
+from scanner import run_full_scan, fetch_data, scan_pullback
+
+# Test 24: fetch_data uses passed provider
+print("\n── Test 24: fetch_data uses passed provider over global ──")
+mock_provider = MagicMock()
+dates = pd.date_range("2025-01-01", periods=120, freq="B")
+mock_df = pd.DataFrame({
+    "Open": np.random.uniform(90, 110, 120),
+    "High": np.random.uniform(100, 120, 120),
+    "Low": np.random.uniform(80, 100, 120),
+    "Close": np.random.uniform(90, 110, 120),
+    "Volume": np.random.randint(500000, 2000000, 120),
+}, index=dates)
+mock_provider.get_bars.return_value = mock_df
+result = fetch_data("XTEST", provider=mock_provider)
+check("Provider.get_bars called", mock_provider.get_bars.called)
+check("fetch_data returned data", result is not None)
+
+# Test 25: run_full_scan threads provider to strategy functions
+print("\n── Test 25: run_full_scan threads provider to scan functions ──")
+call_providers = []
+
+with patch("scanner.fetch_data") as mock_fd:
+    mock_fd.return_value = None  # no signals, just checking provider flows
+    config_prov = AgentConfig()
+    with patch("universe.build_universe", return_value={
+        "tickers": ["XTEST"], "sector_map": {}, "etfs": [], "metadata": {},
+        "built_at": datetime.now().isoformat(), "count": 1,
+    }):
+        run_full_scan(config_prov, provider=mock_provider)
+    for call in mock_fd.call_args_list:
+        if call.kwargs.get("provider") is mock_provider:
+            call_providers.append(True)
+check("Provider kwarg passed through to fetch_data", len(call_providers) >= 1)
 
 # ═══════════════════════════════════════════════════════════════════════════
 print("\n" + "=" * 70)
