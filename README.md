@@ -29,13 +29,29 @@ The core principle is simple: **win about half your trades, but make winners big
 
 The system enforces this mechanically:
 
-- **Fixed risk per trade** — every trade risks exactly 2% of the portfolio. On a $10,000 account, that's $200 per trade. The share count adjusts so the dollar risk stays constant.
+- **Fixed risk per trade** — every trade risks exactly 2% of your portfolio. The share count adjusts so the dollar risk stays constant regardless of stock price.
 - **Minimum reward-to-risk ratio** — won't take a trade unless the potential reward is at least 2x the potential loss.
 - **Portfolio heat cap** — limits total open risk to 12% of the portfolio. If every stop hit at once, you'd lose at most 12%.
 - **Circuit breakers** — after 4 consecutive losses, the system pauses for 3 days. At 10% drawdown, it halves position sizes. At 20%, it stops trading entirely.
 - **Sector limits** — won't pile into one sector. If you already hold 2 tech stocks, it won't buy a third.
 
 For a deeper explanation of every concept used in this system (R-multiples, bracket orders, stops, indicators, regime detection, edge tracking), read **[CONCEPTS.md](CONCEPTS.md)** — it explains everything in plain language without assuming trading knowledge.
+
+## What markets does this cover?
+
+This system trades **US stocks and ETFs** through Alpaca. That includes companies listed on the NYSE and NASDAQ — the two main US stock exchanges.
+
+Alpaca also offers about 700 **ADRs** (American Depositary Receipts). These are shares of international companies — like Toyota, Nestlé, or Samsung — that trade on US exchanges during US hours. So you can trade some international companies, but through their US-listed ADR, not directly on the Tokyo or Swiss exchange.
+
+What's **not** included:
+- European or Asian stock exchanges directly
+- Forex (currency trading)
+- Futures or commodities
+- Crypto (Alpaca supports it, but this system doesn't use it)
+
+**Paper trading works from any country** — there are no geographic restrictions. If you later want to trade with real money, live trading from outside the US requires verification with Alpaca.
+
+All scanning and trading happens during **US market hours**: 9:30 AM to 4:00 PM Eastern Time, Monday through Friday.
 
 ## Getting started
 
@@ -57,8 +73,9 @@ The setup script walks you through everything step by step:
 1. **Checks your Python version** — tells you how to install 3.11+ if you don't have it
 2. **Installs dependencies** — the Python packages the system needs (pandas, yfinance, alpaca SDK, etc.)
 3. **Helps you create Alpaca API keys** — walks you through signing up at [alpaca.markets](https://app.alpaca.markets/signup) and generating paper trading API keys, then saves them to your shell profile
-4. **Verifies the connection** — confirms your keys work and shows your paper account balance
-5. **Runs the test suite** — makes sure everything installed correctly
+4. **Chooses your starting amount** — Alpaca gives you $100K in paper money, but that's unrealistic. You pick a budget the system actually uses for position sizing and risk management.
+5. **Verifies the connection** — confirms your keys work and shows your paper account balance
+6. **Runs the test suite** — makes sure everything installed correctly
 
 After setup completes, try these commands to explore:
 
@@ -113,6 +130,36 @@ Key settings live in `config.py`. The defaults are conservative and designed for
 | `universe.py` | Builds and caches the list of stocks to scan |
 | `correlation_guard.py` | Blocks overexposure to a single sector |
 | `CONCEPTS.md` | Plain-language glossary of every trading term used here |
+
+## For Collaborators (using Claude Code)
+
+This repo is designed to work with [Claude Code](https://claude.ai/claude-code), an AI coding assistant that runs in your terminal. Claude Code reads the system's configuration files automatically and understands the trading pipeline, so you can ask it questions or give it tasks in plain English.
+
+### Starting a session
+
+When you open Claude Code in this repo, it reads `CLAUDE.md` automatically and checks the system status — open positions, today's P&L, scheduler health. You don't need to tell it anything; it starts by showing you what's going on.
+
+### Useful commands
+
+These slash commands are shortcuts for common tasks:
+
+| Command | What it does |
+|---------|--------------|
+| `/status` | What's open, today's P&L, system health |
+| `/edge-check` | Which strategies are earning vs fading |
+| `/run-scan` | Run the scanner manually right now |
+| `/weekly-brief` | Friday-style summary of the week |
+| `/what-happened-today` | Narrative of today's activity |
+| `/why-this-trade` | Explain a specific trade |
+| `/pause-trading` / `/resume-trading` | Stop/start the automated schedule |
+
+### When to clear a session
+
+Claude Code sessions accumulate context as you work. If a session gets long or you're switching topics, type `/clear` to start fresh. Claude re-reads the system state files automatically, so nothing is lost — the ground truth lives in `positions.json`, `trades.csv`, and the log files, not in conversation memory.
+
+### What persists across sessions
+
+Positions, trade history, portfolio value, edge tracking, and configuration all live in files on disk. Clearing a session or starting a new one doesn't affect any of this. The only thing lost on `/clear` is the conversation itself.
 
 ## Daily schedule
 

@@ -17,7 +17,9 @@ The math (2% rule):
   - On $10K with 2% risk: 1R = $200, so +8R = +$1,600 per 10 trades
 """
 
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 @dataclass
@@ -167,8 +169,19 @@ class AgentConfig:
     market_close_minute: int = 0
 
     def __post_init__(self):
-        # Paper exploration mode: loosen filters so we take more trades and
-        # generate more data for the learning loop to analyze.
+        target_ratio = self.target_capital / self.starting_capital
+        user_config_path = Path(__file__).parent / "user_config.json"
+        try:
+            with open(user_config_path) as f:
+                user_cfg = json.load(f)
+            if "starting_capital" in user_cfg:
+                self.starting_capital = float(user_cfg["starting_capital"])
+                self.target_capital = self.starting_capital * target_ratio
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+        if self.target_capital <= self.starting_capital:
+            self.target_capital = self.starting_capital * target_ratio
+
         if self.paper_exploration_mode:
             self.min_reward_risk = self.exploration_min_reward_risk
             self.max_open_positions = self.exploration_max_positions

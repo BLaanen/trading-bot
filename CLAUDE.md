@@ -17,8 +17,9 @@ Conversation memory does not persist across `/clear` or new sessions. The ground
 3. **`logs/launchd_monitor.log` (last ~100 lines)** — what the monitor has been doing
 4. **`logs/launchd_at_open.log` (last ~50 lines)** — today's entry decisions (if market is open)
 5. **`trades.csv` (last ~20 rows)** — recent trade history with P&L and strategy notes
+6. **`user_config.json`** — custom starting capital and user preferences (if present)
 
-From those five files you can answer: what's open, what happened today, is the system healthy. Do not trust anything remembered from a previous conversation — verify against the files.
+From those files you can answer: what's open, what happened today, is the system healthy. Do not trust anything remembered from a previous conversation — verify against the files.
 
 ## The pipeline in one paragraph
 
@@ -68,6 +69,8 @@ API credentials come from environment variables set in `~/.zshrc`:
 - `ALPACA_API_SECRET`
 
 Paper mode is hardcoded in `config.py` via `alpaca_paper: bool = True`. Do NOT flip this to live without explicit user confirmation.
+
+If `user_config.json` exists in the repo root, it overrides `config.py` defaults. Currently supports: `starting_capital` (the user's chosen paper trading budget). This file is gitignored — each collaborator has their own. When computing portfolio progress vs goal, use `starting_capital` from `user_config.json` if present.
 
 ## Git and file layout
 

@@ -13,7 +13,7 @@ echo ""
 
 # ── Step 1: Python version ──────────────────────────────────────────────
 
-echo "Step 1 of 5: Checking Python"
+echo "Step 1 of 6: Checking Python"
 echo "  The bot needs Python 3.11 or newer."
 echo ""
 
@@ -46,7 +46,7 @@ echo "  ✓ Found $PYTHON ($($PYTHON --version))"
 echo ""
 echo "─────────────────────────────────────────────────"
 echo ""
-echo "Step 2 of 5: Installing Python packages"
+echo "Step 2 of 6: Installing Python packages"
 echo "  This installs the libraries the bot needs —"
 echo "  stock data, math tools, and the Alpaca SDK."
 echo ""
@@ -59,7 +59,7 @@ echo "  ✓ All packages installed"
 echo ""
 echo "─────────────────────────────────────────────────"
 echo ""
-echo "Step 3 of 5: Connecting to Alpaca"
+echo "Step 3 of 6: Connecting to Alpaca"
 echo ""
 echo "  Alpaca is the broker this bot trades through."
 echo "  You need a free paper trading account — this uses"
@@ -130,12 +130,89 @@ else
     fi
 fi
 
-# ── Step 4: Verify connection ───────────────────────────────────────────
+# ── Step 4: Choose starting amount ─────────────────────────────────────
 
 echo ""
 echo "─────────────────────────────────────────────────"
 echo ""
-echo "Step 4 of 5: Testing the connection"
+echo "Step 4 of 6: Choose your starting amount"
+echo ""
+echo "  Alpaca gives you \$100,000 in paper money, but that's not"
+echo "  realistic for learning — most people don't start with \$100K."
+echo ""
+echo "  This system tracks a separate budget that controls how much"
+echo "  it actually uses. Position sizes, risk limits, and portfolio"
+echo "  tracking all work from YOUR number, not Alpaca's."
+echo ""
+echo "  Common starting amounts:"
+echo "    \$1,000  — very conservative, 1-2 positions at a time"
+echo "    \$5,000  — room for 3-4 positions with proper sizing"
+echo "    \$10,000 — the default, good balance of diversification and learning"
+echo "    \$25,000 — avoids pattern day trader rules if you go live later"
+echo ""
+
+USER_CONFIG="user_config.json"
+CURRENT_CAPITAL=""
+
+if [ -f "$USER_CONFIG" ]; then
+    CURRENT_CAPITAL=$($PYTHON -c "
+import json
+try:
+    with open('$USER_CONFIG') as f:
+        print(json.load(f).get('starting_capital', ''))
+except Exception:
+    print('')
+" 2>/dev/null)
+fi
+
+while true; do
+    if [ -n "$CURRENT_CAPITAL" ]; then
+        formatted=$($PYTHON -c "print(f'\${int(float($CURRENT_CAPITAL)):,}')" 2>/dev/null || echo "\$$CURRENT_CAPITAL")
+        read -rp "  You already have a starting amount set: $formatted. Press Enter to keep it, or type a new amount: " capital_input
+        if [ -z "$capital_input" ]; then
+            echo "  ✓ Keeping your current starting amount: $formatted"
+            break
+        fi
+    else
+        read -rp "  Enter your starting amount in dollars (or press Enter for \$10,000): " capital_input
+        if [ -z "$capital_input" ]; then
+            capital_input="10000"
+        fi
+    fi
+
+    capital_clean=$(echo "$capital_input" | tr -d '$,')
+
+    if ! $PYTHON -c "
+v = float('$capital_clean')
+assert v >= 500
+" 2>/dev/null; then
+        echo "  Please enter a number of 500 or more. Below \$500, the 2% risk rule"
+        echo "  produces positions too small to trade."
+        echo ""
+        continue
+    fi
+
+    if ! $PYTHON -c "
+import json
+with open('$USER_CONFIG', 'w') as f:
+    json.dump({'starting_capital': float('$capital_clean')}, f, indent=2)
+print('ok')
+" 2>/dev/null; then
+        echo "  ✗ Could not write $USER_CONFIG. Check file permissions."
+        break
+    fi
+
+    formatted=$($PYTHON -c "print(f'\${int(float($capital_clean)):,}')" 2>/dev/null || echo "\$$capital_clean")
+    echo "  ✓ Starting with $formatted — the system will size positions and track risk based on this amount."
+    break
+done
+
+# ── Step 5: Verify connection ───────────────────────────────────────────
+
+echo ""
+echo "─────────────────────────────────────────────────"
+echo ""
+echo "Step 5 of 6: Testing the connection"
 echo ""
 
 if [ -n "${ALPACA_API_KEY:-}" ] && [ -n "${ALPACA_API_SECRET:-}" ]; then
@@ -172,12 +249,12 @@ else
     echo "    but it won't be able to place orders or check real prices."
 fi
 
-# ── Step 5: Run tests ──────────────────────────────────────────────────
+# ── Step 6: Run tests ──────────────────────────────────────────────────
 
 echo ""
 echo "─────────────────────────────────────────────────"
 echo ""
-echo "Step 5 of 5: Running tests"
+echo "Step 6 of 6: Running tests"
 echo "  Making sure everything works..."
 echo ""
 
