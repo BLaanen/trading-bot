@@ -545,10 +545,27 @@ def scan_powerx(ticker: str, config: AgentConfig, provider=None) -> Signal | Non
 
     # ── All three confirmed. Build the signal. ──
 
-    # Fixed percentage stop and target (Heitkoetter PowerX Optimizer style)
-    # Default: 1.5% stop / 4.5% target = R:R 3.0 ("Quick Trades")
-    stop_loss = latest_close * (1 - config.powerx_stop_pct)
-    target = latest_close * (1 + config.powerx_target_pct)
+    # ATR-based stop so the distance reflects each stock's actual daily
+    # volatility. A fixed 1.5% stop was getting chopped on ~2% ATR names
+    # (same-day stop-outs on KMB, CRDO, IT in April 2026). Floor at
+    # powerx_stop_floor_pct so low-ATR names still get enough room.
+    atr = calc_atr(data)
+    atr_now = float(atr.iloc[-1])
+    if pd.isna(atr_now) or atr_now <= 0:
+        return None
+
+    stop_distance = max(
+        atr_now * config.powerx_atr_stop_mult,
+        latest_close * config.powerx_stop_floor_pct,
+    )
+
+    # Reject if the required stop is too wide — sizing sanity.
+    if stop_distance / latest_close > config.powerx_stop_max_pct:
+        return None
+
+    stop_loss = latest_close - stop_distance
+    target = latest_close + stop_distance * config.powerx_target_r
+    stop_pct = stop_distance / latest_close * 100
 
     signal = Signal(
         ticker=ticker,
@@ -558,7 +575,8 @@ def scan_powerx(ticker: str, config: AgentConfig, provider=None) -> Signal | Non
         stop_loss=round(stop_loss, 2),
         target=round(target, 2),
         reason=f"Triple confirm: RSI(7)={rsi_now:.0f}, "
-               f"MACD hist +{hist_now:.3f}, Stoch %K={k_now:.0f}>%D={d_now:.0f}",
+               f"MACD hist +{hist_now:.3f}, Stoch %K={k_now:.0f}>%D={d_now:.0f}, "
+               f"stop -{stop_pct:.1f}% ({config.powerx_atr_stop_mult}×ATR)",
     )
 
     return signal

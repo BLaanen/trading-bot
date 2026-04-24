@@ -27,7 +27,8 @@ from datetime import datetime
 from pathlib import Path
 
 from config import AgentConfig
-from scanner import Signal
+from scanner import Signal, calc_atr
+from data_provider import get_bars
 
 
 @dataclass
@@ -284,10 +285,28 @@ def calculate_position_size(signal: Signal, state: PortfolioState, config: Agent
 
 # ─── Trailing stop management ───────────────────────────────────────────────
 
+def _get_atr(ticker: str) -> float | None:
+    """Fetch current 14-period ATR for a ticker. Returns None on failure."""
+    try:
+        data = get_bars(ticker, period="3mo")
+        if data is None or len(data) < 20:
+            return None
+        atr_series = calc_atr(data, period=14)
+        val = float(atr_series.iloc[-1])
+        return val if val > 0 else None
+    except Exception:
+        return None
+
+
 def update_trailing_stops(state: PortfolioState, config: AgentConfig) -> list[RiskDecision]:
     """
     Update stops for all open positions. This is the core of
     "let winners run, cut losers short."
+
+    Trail distance is ATR-based: HWM - (ATR * multiplier).
+    This gives volatile stocks more room and tight stocks less.
+    Falls back to the fixed trail_distance_pct if ATR can't be fetched.
+    The stop never goes below initial_stop.
     """
     if not config.use_trailing_stops:
         return []
@@ -315,13 +334,23 @@ def update_trailing_stops(state: PortfolioState, config: AgentConfig) -> list[Ri
 
         # Phase 2: Trail the stop up (propose only — caller applies after broker confirm)
         if pos.trailing:
-            trail_stop = pos.high_water_mark * (1 - config.trail_distance_pct)
-            new_stop_price = round(trail_stop, 2)
+            atr = _get_atr(pos.ticker)
+            if atr is not None:
+                trail_distance = atr * config.trail_atr_multiplier
+                trail_stop = pos.high_water_mark - trail_distance
+                method = f"ATR ${atr:.2f} x {config.trail_atr_multiplier}"
+            else:
+                trail_stop = pos.high_water_mark * (1 - config.trail_distance_pct)
+                method = f"fixed {config.trail_distance_pct:.0%}"
+
+            # Never go below initial stop
+            new_stop_price = round(max(trail_stop, pos.initial_stop), 2)
+
             if new_stop_price > pos.stop_loss:
                 decisions.append(RiskDecision(
                     action="TRAIL",
                     reason=f"{pos.ticker}: Stop trailed ${pos.stop_loss:.2f} → ${new_stop_price:.2f} "
-                           f"(HWM: ${pos.high_water_mark:.2f}, {pos.r_multiple:.1f}R)",
+                           f"(HWM: ${pos.high_water_mark:.2f}, {pos.r_multiple:.1f}R, {method})",
                     new_stop=new_stop_price,
                     severity="INFO",
                     ticker=pos.ticker,

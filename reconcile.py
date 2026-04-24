@@ -72,6 +72,7 @@ def reconcile_with_broker(config: AgentConfig) -> bool:
 
     corrections = []
     new_positions = []
+    cash_delta = 0.0  # net adjustment to local cash from corrections
 
     # Walk through all tickers from both sides
     all_tickers = set(broker_map.keys()) | set(local_map.keys())
@@ -81,9 +82,11 @@ def reconcile_with_broker(config: AgentConfig) -> bool:
         local = local_map.get(ticker)
 
         if broker and not local:
-            # Broker has it, we don't — add it to local state
+            # Broker has it, we don't — add it to local state.
+            # Debit local cash by what the buy would have cost locally.
             msg = f"ADDED {ticker}: {broker['qty']} shares @ ${broker['avg_entry']:.2f} (was at broker but missing locally)"
             corrections.append(msg)
+            cash_delta -= broker["qty"] * broker["avg_entry"]
             default_stop = round(broker["avg_entry"] * 0.95, 2)
             new_positions.append(Position(
                 ticker=ticker,
@@ -99,16 +102,21 @@ def reconcile_with_broker(config: AgentConfig) -> bool:
             ))
 
         elif local and not broker:
-            # We think we have it, but broker doesn't — it was closed (stop/target hit)
+            # We think we have it, but broker doesn't — it was closed (stop/target hit).
+            # Credit local cash with approximate sale proceeds at last known price.
             pnl = (local.current_price - local.entry_price) * local.shares
             msg = f"REMOVED {ticker}: {local.shares} shares (broker closed it, est P&L ${pnl:.2f})"
             corrections.append(msg)
+            cash_delta += local.shares * local.current_price
             # Don't add to new_positions — it's gone
 
         elif broker and local:
             # Both have it — check for qty/price drift
             updated = False
             if broker["qty"] != local.shares:
+                qty_diff = broker["qty"] - local.shares
+                # Positive diff = broker bought more; debit local cash. Negative = partial sell; credit.
+                cash_delta -= qty_diff * broker["avg_entry"]
                 msg = f"FIXED {ticker} qty: local={local.shares} → broker={broker['qty']}"
                 corrections.append(msg)
                 local.shares = broker["qty"]
@@ -123,6 +131,14 @@ def reconcile_with_broker(config: AgentConfig) -> bool:
 
         # (if neither has it, nothing to do)
 
+    # Always refresh current prices from broker (even without corrections)
+    # so total_value reflects live quotes.
+    def _recompute_total(state):
+        positions_mv = sum(p.shares * p.current_price for p in state.positions)
+        state.total_value = round(state.cash + positions_mv, 2)
+        if state.total_value > state.peak_value:
+            state.peak_value = state.total_value
+
     # Apply corrections
     if corrections:
         print(f"\n  [RECONCILE] AUTO-FIX at {datetime.now().strftime('%H:%M:%S')} — {len(corrections)} correction(s):")
@@ -131,19 +147,24 @@ def reconcile_with_broker(config: AgentConfig) -> bool:
             _log_correction(c)
 
         local_state.positions = new_positions
-        # Use broker's authoritative cash and portfolio value
-        local_state.cash = float(acct.cash)
-        local_state.total_value = float(acct.portfolio_value)
-        if local_state.total_value > local_state.peak_value:
-            local_state.peak_value = local_state.total_value
+        # Adjust local cash by the net delta from the corrections above.
+        # Do NOT pull from acct.cash/acct.portfolio_value — that would overwrite
+        # the configured $10K-scale ledger with Alpaca's full paper-sandbox balance.
+        local_state.cash = round(local_state.cash + cash_delta, 2)
+        _recompute_total(local_state)
         save_positions(local_state)
+        broker_equity = float(acct.portfolio_value)
+        if broker_equity > local_state.total_value * 1.5:
+            print(f"    [NOTE] Alpaca paper balance (${broker_equity:,.2f}) exceeds local "
+                  f"ledger (${local_state.total_value:,.2f}). Sizing uses local ledger only.")
         print(f"    Saved: {len(new_positions)} positions, cash=${local_state.cash:,.2f}, total=${local_state.total_value:,.2f}")
     else:
-        # No corrections needed — still update current prices
+        # No corrections needed — still update current prices and recompute total
         for ticker, local in local_map.items():
             if ticker in broker_map:
                 local.current_price = broker_map[ticker]["current_price"]
         local_state.positions = list(local_map.values())
+        _recompute_total(local_state)
         save_positions(local_state)
         print(f"  [RECONCILE] OK — {len(broker_map)} positions match between local and broker")
 

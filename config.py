@@ -65,9 +65,10 @@ class AgentConfig:
     # ── Trailing stop system ──
     # When enabled, the stop trails up to lock in profits after 1R gain.
     # When disabled (default), bracket orders handle all exits at the broker.
-    use_trailing_stops: bool = False
+    use_trailing_stops: bool = True
     trail_activation_r: float = 1.0    # Start trailing after 1R profit
-    trail_distance_pct: float = 0.05   # Trail 5% behind the high
+    trail_distance_pct: float = 0.05   # Trail 5% behind the high (fallback if ATR unavailable)
+    trail_atr_multiplier: float = 2.0  # Trail = HWM - (ATR * multiplier). Adapts to each stock's volatility.
 
     # ── Position management ──
     max_position_pct: float = 0.10     # Max 10% of portfolio per position
@@ -97,15 +98,14 @@ class AgentConfig:
     powerx_stoch_slowing: int = 3
     powerx_min_volume: int = 500_000   # Min avg daily volume
     powerx_min_price: float = 10.0     # Min stock price
-    # PowerX Optimizer stop/target as fixed % of entry price.
-    # Settings from Heitkoetter's PowerX Optimizer:
-    #   Conservative:    1.5% risk / 3.0% reward (R:R 2.0)
-    #   Quick Trades:    1.5% risk / 4.5% reward (R:R 3.0)
-    #   M&M Balanced:    2.5% risk / 5.0% reward (R:R 2.0)
-    #   Position Trader: 2.5% risk / 7.5% reward (R:R 3.0)
-    # Default: Quick Trades (1.5/4.5) — 60% win rate in backtests, R:R 3.0
-    powerx_stop_pct: float = 0.015     # Stop 1.5% below entry
-    powerx_target_pct: float = 0.045   # Target 4.5% above entry
+    # PowerX stops are ATR-based so volatile stocks get room to breathe and
+    # sleepy stocks don't get absurdly wide stops. Floor and ceiling prevent
+    # the rare degenerate cases. Target maintains a 3R ratio (matches the
+    # "Quick Trades" preset from Heitkoetter's PowerX Optimizer).
+    powerx_atr_stop_mult: float = 1.5   # Stop = close - 1.5 × ATR
+    powerx_stop_floor_pct: float = 0.025  # Never closer than 2.5% (avoid same-day chop)
+    powerx_stop_max_pct: float = 0.06   # Reject signal if stop would be > 6% away
+    powerx_target_r: float = 3.0        # Target = 3 × stop distance (R:R 3.0)
 
     # Trend filter (applied to ALL strategies)
     trend_ema: int = 50                # Must be above 50 EMA to go long
