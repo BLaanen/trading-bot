@@ -331,6 +331,41 @@ def build_universe(
     liquid = _filter_by_liquidity(all_candidates, min_volume, min_price)
     print(f"  [UNIVERSE]   → {len(liquid)} passed liquidity filter")
 
+    # Sanity check: if Yahoo's bulk download was largely a wash (DNS failures,
+    # timeouts, etc.), `liquid` will be far smaller than normal. Rather than
+    # build a degraded universe and ship it for trading, prefer last good cache.
+    # Only trigger when we tried a real-sized run (>=100 candidates) and >70%
+    # of them failed. Skips tiny test runs and small custom universes.
+    fail_rate = 1 - (len(liquid) / max(len(all_candidates), 1))
+    if len(all_candidates) >= 100 and fail_rate > 0.70:
+        if CACHE_FILE.exists():
+            try:
+                with open(CACHE_FILE) as f:
+                    stale = json.load(f)
+                built = stale.get("built_at", "unknown")[:10]
+                print(f"  [UNIVERSE] Only {len(liquid)} of {len(all_candidates)} passed "
+                      f"({fail_rate:.0%} failure) — Yahoo download likely degraded. "
+                      f"Falling back to cached universe ({stale.get('count', 0)} tickers, "
+                      f"built {built}).")
+                return stale
+            except Exception as e:
+                print(f"  [UNIVERSE] Stale cache unreadable ({e}); using FALLBACK_TICKERS.")
+        else:
+            print(f"  [UNIVERSE] No cache available; using FALLBACK_TICKERS.")
+        # Last resort: hardcoded fallback list
+        fallback_meta = {t: {"name": "", "sector": "UNKNOWN", "avg_volume": 0, "last_price": 0}
+                         for t in FALLBACK_TICKERS}
+        fallback_sector_map = {t: "UNKNOWN" for t in FALLBACK_TICKERS}
+        return {
+            "tickers": list(FALLBACK_TICKERS),
+            "sector_map": fallback_sector_map,
+            "etfs": CORE_ETFS + SECTOR_ETFS,
+            "metadata": fallback_meta,
+            "built_at": datetime.now().isoformat(),
+            "count": len(FALLBACK_TICKERS) + len(CORE_ETFS) + len(SECTOR_ETFS),
+            "degraded": True,
+        }
+
     # Sort by volume (most liquid first)
     liquid.sort(key=lambda s: s.get("avg_volume", 0), reverse=True)
 

@@ -8,13 +8,15 @@ When mismatches are found, auto-fixes local state to match the broker
 Run at the top of every orchestrator cycle before any trading logic.
 """
 
+import csv
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from config import AgentConfig
 from risk_manager import load_positions, save_positions, Position
+from trade_tracker import log_trade, TRADES_FILE
 
 try:
     import alpaca_trade_api as tradeapi
@@ -30,6 +32,66 @@ def _log_correction(msg: str):
     RECONCILE_LOG.parent.mkdir(exist_ok=True)
     with open(RECONCILE_LOG, "a") as f:
         f.write(f"[{datetime.now().isoformat()}] {msg}\n")
+
+
+def _get_recent_sell_fill(client, ticker: str, since_days: int = 7) -> dict | None:
+    """Find the most recent SELL fill for a ticker so reconciler P&L matches reality.
+
+    Returns {"fill_price", "qty", "filled_at"} or None if no fill found.
+    """
+    try:
+        # Alpaca wants RFC3339 in UTC: '2006-01-02T15:04:05Z'
+        after_dt = datetime.utcnow() - timedelta(days=since_days)
+        after = after_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        orders = client.list_orders(
+            status="closed",
+            symbols=[ticker],
+            after=after,
+            limit=20,
+            direction="desc",
+        )
+        for order in orders:
+            if (
+                order.side == "sell"
+                and order.filled_qty
+                and float(order.filled_qty) > 0
+                and order.filled_avg_price
+            ):
+                return {
+                    "fill_price": float(order.filled_avg_price),
+                    "qty": int(float(order.filled_qty)),
+                    "filled_at": getattr(order, "filled_at", None),
+                }
+        return None
+    except Exception as e:
+        print(f"  [RECONCILE] could not fetch sell fill for {ticker}: {e}")
+        return None
+
+
+def _get_original_buy_metadata(ticker: str) -> dict | None:
+    """Look up the most recent BUY in trades.csv so re-added positions keep their
+    original strategy/stop/target instead of being clobbered with defaults.
+    """
+    if not TRADES_FILE.exists():
+        return None
+    try:
+        with open(TRADES_FILE) as f:
+            reader = csv.DictReader(f)
+            buys = [r for r in reader if r.get("ticker") == ticker and r.get("action") == "BUY"]
+        if not buys:
+            return None
+        last = buys[-1]
+        stop = float(last["stop_loss"]) if last.get("stop_loss") else None
+        target = float(last["target"]) if last.get("target") else None
+        return {
+            "strategy": last.get("strategy") or "POWERX",
+            "stop_loss": stop,
+            "target": target,
+            "entry_date": last["date"][:10] if last.get("date") else None,
+        }
+    except Exception as e:
+        print(f"  [RECONCILE] could not read trades.csv for {ticker}: {e}")
+        return None
 
 
 def reconcile_with_broker(config: AgentConfig) -> bool:
@@ -83,31 +145,77 @@ def reconcile_with_broker(config: AgentConfig) -> bool:
 
         if broker and not local:
             # Broker has it, we don't — add it to local state.
-            # Debit local cash by what the buy would have cost locally.
-            msg = f"ADDED {ticker}: {broker['qty']} shares @ ${broker['avg_entry']:.2f} (was at broker but missing locally)"
+            # Try to recover original strategy/stop/target from trades.csv so we don't
+            # clobber a real POWERX/PULLBACK signal with UNKNOWN_RECONCILED defaults.
+            metadata = _get_original_buy_metadata(ticker)
+            if metadata and metadata["stop_loss"] is not None:
+                strategy = metadata["strategy"]
+                stop_loss = metadata["stop_loss"]
+                target = metadata["target"] or round(broker["avg_entry"] * 1.10, 2)
+                entry_date = metadata["entry_date"] or datetime.now().strftime("%Y-%m-%d")
+                source = f"recovered from trades.csv ({strategy})"
+            else:
+                strategy = "UNKNOWN_RECONCILED"
+                stop_loss = round(broker["avg_entry"] * 0.95, 2)
+                target = round(broker["avg_entry"] * 1.10, 2)
+                entry_date = datetime.now().strftime("%Y-%m-%d")
+                source = "no prior record; using defaults"
+            msg = (
+                f"ADDED {ticker}: {broker['qty']} sh @ ${broker['avg_entry']:.2f} "
+                f"(was at broker but missing locally; {source})"
+            )
             corrections.append(msg)
             cash_delta -= broker["qty"] * broker["avg_entry"]
-            default_stop = round(broker["avg_entry"] * 0.95, 2)
             new_positions.append(Position(
                 ticker=ticker,
                 shares=broker["qty"],
                 entry_price=broker["avg_entry"],
                 current_price=broker["current_price"],
-                stop_loss=default_stop,
-                initial_stop=default_stop,
-                target=round(broker["avg_entry"] * 1.10, 2),
-                strategy="UNKNOWN_RECONCILED",
-                entry_date=datetime.now().strftime("%Y-%m-%d"),
+                stop_loss=stop_loss,
+                initial_stop=stop_loss,
+                target=target,
+                strategy=strategy,
+                entry_date=entry_date,
                 high_water_mark=broker["current_price"],
             ))
 
         elif local and not broker:
             # We think we have it, but broker doesn't — it was closed (stop/target hit).
-            # Credit local cash with approximate sale proceeds at last known price.
-            pnl = (local.current_price - local.entry_price) * local.shares
-            msg = f"REMOVED {ticker}: {local.shares} shares (broker closed it, est P&L ${pnl:.2f})"
+            # Query Alpaca for the actual sell fill so P&L and the audit trail match
+            # what really happened, instead of estimating from the last cached price.
+            fill = _get_recent_sell_fill(client, ticker)
+            if fill:
+                sell_price = fill["fill_price"]
+                sell_qty = fill["qty"] or local.shares
+                pnl = (sell_price - local.entry_price) * sell_qty
+                cash_delta += sell_qty * sell_price
+                msg = (
+                    f"REMOVED {ticker}: {sell_qty} sh (broker sold @ ${sell_price:.2f}, "
+                    f"P&L ${pnl:+.2f})"
+                )
+                outcome = "WIN" if pnl > 0 else ("LOSS" if pnl < 0 else "BREAKEVEN")
+                try:
+                    log_trade(
+                        ticker=ticker,
+                        action="SELL",
+                        shares=sell_qty,
+                        price=sell_price,
+                        strategy=local.strategy,
+                        pnl=pnl,
+                        outcome=outcome,
+                        notes="Broker bracket exit (reconciled)",
+                    )
+                except Exception as e:
+                    print(f"  [RECONCILE] sell logged in state but trades.csv write failed: {e}")
+            else:
+                # No fill found — fall back to old estimate so we still settle local state.
+                pnl = (local.current_price - local.entry_price) * local.shares
+                cash_delta += local.shares * local.current_price
+                msg = (
+                    f"REMOVED {ticker}: {local.shares} sh (broker closed it, fill not found, "
+                    f"est P&L ${pnl:+.2f})"
+                )
             corrections.append(msg)
-            cash_delta += local.shares * local.current_price
             # Don't add to new_positions — it's gone
 
         elif broker and local:
